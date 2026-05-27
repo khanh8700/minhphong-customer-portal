@@ -13,6 +13,7 @@ jobs:
       - name: Trigger Sync API
         run: |
           curl -X POST "${{ secrets.PORTAL_URL }}/api/cron/sync-erp?full=0" \
+          -L \
           -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
           -H "Content-Type: application/json" \
           --fail
