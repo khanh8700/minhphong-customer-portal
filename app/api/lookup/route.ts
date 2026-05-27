@@ -13,7 +13,7 @@ const lookupSchema = z.object({
   phone: z.string().min(8).max(32)
 });
 
-const GENERIC_ERROR = "Không tìm thấy thông tin phù hợp. Vui lòng kiểm tra lại mã khách hàng và số điện thoại.";
+const GENERIC_ERROR = "Không tìm thấy thông tin phù hợp. Vui lòng kiểm tra lại mã KH, SĐT hoặc liên hệ Hotline: 0359 613 267 để được hỗ trợ.";
 
 export async function POST(req: NextRequest) {
   const supabase = createPortalAdminClient();

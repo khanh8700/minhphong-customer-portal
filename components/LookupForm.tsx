@@ -59,10 +59,14 @@ export function LookupForm() {
           required
         />
       </div>
-      <button className="primary-button" type="submit" disabled={loading} style={{ width: "100%" }}>
+      <button className="primary-button" type="submit" disabled={loading} style={{ width: "100%", marginBottom: 16 }}>
         <Search size={18} />
         {loading ? "Đang kiểm tra" : "Tra cứu"}
       </button>
+      
+      <div style={{ textAlign: "center", fontSize: 14, color: "var(--muted-text)" }}>
+        Cần hỗ trợ? Liên hệ Hotline: <strong>0359 613 267</strong>
+      </div>
     </form>
   );
 }
