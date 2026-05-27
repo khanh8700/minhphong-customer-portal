@@ -1,0 +1,18 @@
+name: ERP Data Sync Cron
+
+on:
+  schedule:
+    # Chạy mỗi 60 phút
+    - cron: '0 * * * *'
+  workflow_dispatch: # Cho phép chạy thủ công từ giao diện GitHub
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Sync API
+        run: |
+          curl -X POST "${{ secrets.PORTAL_URL }}/api/cron/sync-erp?full=0" \
+          -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json" \
+          --fail
