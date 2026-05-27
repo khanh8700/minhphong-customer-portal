@@ -25,11 +25,9 @@ Dự án này sử dụng GitHub Actions để tự động hóa 2 quy trình r�
 Để các luồng tự động này hoạt động được, bạn cần vào trang quản lý Repository trên GitHub, truy cập tab **Settings > Secrets and variables > Actions** và thêm các biến bảo mật (Repository Secrets) sau:
 
 ### 2.1 Cấu hình cho Database Migrations
-Quy trình này sẽ tự động kiểm tra cú pháp file SQL và áp dụng (push) các thay đổi Database lên môi trường Staging khi merge code, và lên Production khi được duyệt. Bạn cần khai báo:
+Quy trình này sẽ tự động kiểm tra cú pháp file SQL và áp dụng (push) các thay đổi Database lên môi trường Production khi code được merge vào nhánh `main` (có thể yêu cầu duyệt thủ công nếu cấu hình Required Reviewers). Bạn cần khai báo:
 
-- `SUPABASE_ACCESS_TOKEN`: Token truy cập cá nhân tạo từ tài khoản Supabase (Dùng chung để gọi API Supabase).
-- `STAGING_SUPABASE_PROJECT_REF`: Mã Project Ref của Supabase môi trường Staging (Gồm 20 ký tự ở URL dự án).
-- `STAGING_SUPABASE_DB_PASSWORD`: Mật khẩu kết nối Database của môi trường Staging.
+- `SUPABASE_ACCESS_TOKEN`: Token truy cập cá nhân tạo từ tài khoản Supabase.
 - `PROD_SUPABASE_PROJECT_REF`: Mã Project Ref của Supabase môi trường Production.
 - `PROD_SUPABASE_DB_PASSWORD`: Mật khẩu kết nối Database của môi trường Production.
 

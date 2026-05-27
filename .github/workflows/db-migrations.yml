@@ -3,17 +3,14 @@ name: Database Migrations
 # Quy trình deploy migration:
 #
 #   1. Dev code với local DB → tạo file migration mới trong supabase/migrations/
-#   2. Push lên branch `staging`
-#      → Vercel tự tạo Preview deployment (code)
-#      → job `deploy-staging` tự động apply migration lên Staging DB
-#   3. Test trên Staging (cả code + DB). Nếu pass:
-#      → Merge `staging` vào `main`
-#      → Chạy manual workflow_dispatch target=production + confirm=DEPLOY
-#      → GitHub Environment 'production' yêu cầu manual approval
-#      → job `deploy-production` apply lên Production DB
-#      → Vercel tự deploy Production (code)
-#
-# Xem chi tiết: docs/db-deployment-workflow.md
+#   2. Push lên nhánh `main` (hoặc tạo PR merge vào `main`)
+#   3. Workflow tự động chạy validate file migration.
+#   4. Deploy lên Production:
+#      - Tự động chạy khi có code mới ở nhánh `main`
+#      - (HOẶC) Chạy thủ công từ tab Actions (workflow_dispatch)
+#   5. GitHub Environment 'production' sẽ yêu cầu bạn vào Approve (Required Reviewers)
+#   6. Sau khi Approve, job `deploy-production` apply file migration lên Production DB
+#   7. Vercel tự deploy phần Code lên web.
 
 on:
   pull_request:
@@ -22,18 +19,11 @@ on:
       - 'scripts/database/validate-migrations.mjs'
       - '.github/workflows/db-migrations.yml'
   push:
-    branches: [staging]
+    branches: [main]
     paths:
       - 'supabase/migrations/**'
   workflow_dispatch:
     inputs:
-      target:
-        description: 'Môi trường deploy'
-        required: true
-        type: choice
-        options:
-          - staging
-          - production
       confirm:
         description: 'Gõ "DEPLOY" để xác nhận (phòng click nhầm)'
         required: true
@@ -42,15 +32,14 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Chặn chạy song song cùng 1 môi trường → tránh race condition migration.
+# Chặn chạy song song
 concurrency:
-  group: db-migrations-${{ github.event.inputs.target || github.ref }}
+  group: db-migrations-production
   cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
-  # JOB 1: Validate — chạy trên mọi PR đụng tới migration.
-  # Mục tiêu: bắt lỗi format + cảnh báo destructive trước khi merge.
+  # JOB 1: Validate — chạy trên mọi PR hoặc lúc chạy thủ công
   # ---------------------------------------------------------------------------
   validate:
     name: Validate Migrations
@@ -73,135 +62,33 @@ jobs:
           version: 2.100.1
 
       - name: Dry-run migrations trên Postgres container
-        # Spin up Postgres local, apply toàn bộ migration tuần tự để đảm bảo
-        # không có SQL syntax error hoặc FK broken order.
         run: |
           docker run -d --name pg-test \
             -e POSTGRES_PASSWORD=postgres \
             -p 54322:5432 \
             postgres:15
-          # Đợi Postgres ready
           for i in {1..30}; do
             if docker exec pg-test pg_isready -U postgres > /dev/null 2>&1; then
               break
             fi
             sleep 1
           done
-          # Apply từng file một (không check schema_migrations vì đây là DB rỗng).
           for f in supabase/migrations/*.sql; do
             echo "→ Applying $f"
             docker exec -i pg-test psql -U postgres -d postgres -v ON_ERROR_STOP=1 < "$f"
           done
           docker stop pg-test
         continue-on-error: true
-        # NOTE: continue-on-error vì baseline init_canonical.sql chứa GRANT tới
-        # role Supabase-specific (authenticated, anon) không tồn tại trên vanilla
-        # Postgres. Khi chuyển sang dùng shadow DB Supabase local, bỏ flag này.
 
   # ---------------------------------------------------------------------------
-  # JOB 2: Deploy → Staging
-  # Trigger:
-  #   - Push vào branch `staging` (auto).
-  #   - Manual dispatch với target=staging.
-  # ---------------------------------------------------------------------------
-  deploy-staging:
-    name: Deploy → Staging
-    if: |
-      (github.event_name == 'push' && github.ref == 'refs/heads/staging') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'staging' && github.event.inputs.confirm == 'DEPLOY')
-    runs-on: ubuntu-latest
-    environment:
-      name: staging
-    env:
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_DB_PASSWORD: ${{ secrets.STAGING_SUPABASE_DB_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - uses: supabase/setup-cli@v1
-        with:
-          version: 2.100.1
-
-      - name: Link to Staging project
-        run: supabase link --project-ref ${{ secrets.STAGING_SUPABASE_PROJECT_REF }}
-
-      - name: Repair orphaned remote migrations (Staging)
-        # So sánh migration history trên remote với các file local trong supabase/migrations/.
-        # Bất kỳ version nào trên remote mà không có file local tương ứng đều được
-        # đánh dấu là 'reverted' để CLI cho phép push migration mới.
-        # (Áp dụng cho cả squash baseline lẹch và orphaned migrations sau baseline.)
-        run: |
-          PROJECT_REF="${{ secrets.STAGING_SUPABASE_PROJECT_REF }}"
-
-          # Lấy danh sách version từ file local
-          LOCAL_VERSIONS=$(ls supabase/migrations/*.sql 2>/dev/null | grep -oE '[0-9]{14}' | sort | xargs)
-          echo "Local versions: $LOCAL_VERSIONS"
-
-          # Lấy danh sách version từ remote và tìm các version không có trong local
-          ORPHANED=$(node -e "
-            const https = require('https');
-            https.get({
-              hostname: 'api.supabase.com',
-              path: '/v1/projects/${PROJECT_REF}/database/migrations',
-              headers: { 'Authorization': 'Bearer ${SUPABASE_ACCESS_TOKEN}' }
-            }, r => {
-              let d = '';
-              r.on('data', c => d += c);
-              r.on('end', () => {
-                const migs = JSON.parse(d);
-                if (!Array.isArray(migs)) { process.exit(0); }
-                const local = '${LOCAL_VERSIONS}'.trim().split(/\s+/).filter(Boolean);
-                const orphaned = migs
-                  .filter(m => !local.includes(m.version))
-                  .map(m => m.version);
-                if (orphaned.length > 0) process.stdout.write(orphaned.join(' '));
-              });
-            });
-          " 2>/dev/null)
-
-          if [ -n "$ORPHANED" ]; then
-            echo "Found $(echo $ORPHANED | wc -w) orphaned remote migrations to repair..."
-            supabase migration repair --status reverted $ORPHANED
-            echo "✅ Migration history aligned."
-          else
-            echo "✅ No orphaned migrations. Remote and local are in sync."
-          fi
-
-      - name: Show migration list
-        run: supabase migration list
-
-      - name: Repair Baseline Migrations (Nếu db đã có schema nhưng thiếu lịch sử)
-        run: |
-          supabase migration repair --status applied 20260516000000 --yes --password "$SUPABASE_DB_PASSWORD"
-          supabase migration repair --status applied 20260516000001 --yes --password "$SUPABASE_DB_PASSWORD"
-
-
-      - name: Push migration lên Staging
-        run: supabase db push --include-all
-
-      - name: Verify đồng bộ
-        run: |
-          echo "### Migration list sau khi push:" >> $GITHUB_STEP_SUMMARY
-          supabase migration list >> $GITHUB_STEP_SUMMARY 2>&1 || true
-
-  # ---------------------------------------------------------------------------
-  # JOB 3: Deploy → Production
-  # Trigger: DUY NHẤT manual dispatch với target=production + confirm=DEPLOY.
-  # Bảo vệ:
-  #   - GitHub Environment `production` phải cấu hình Required Reviewers
-  #     → pause đợi approval trước khi chạy step đầu tiên.
-  #   - concurrency group đảm bảo không chạy song song.
+  # JOB 2: Deploy → Production
+  # Trigger: Tự động khi code merge vào main HOẶC thủ công qua dispatch
   # ---------------------------------------------------------------------------
   deploy-production:
     name: Deploy → Production
     if: |
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.target == 'production' &&
-      github.event.inputs.confirm == 'DEPLOY'
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'DEPLOY')
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -219,26 +106,14 @@ jobs:
         with:
           version: 2.100.1
 
-      - name: Chặn branch không phải main
-        if: github.ref != 'refs/heads/main'
-        run: |
-          echo "❌ Chỉ được deploy Production từ branch 'main'."
-          echo "   Branch hiện tại: ${{ github.ref }}"
-          exit 1
-
       - name: Link to Production project
         run: supabase link --project-ref ${{ secrets.PROD_SUPABASE_PROJECT_REF }}
 
       - name: Repair orphaned remote migrations (Production)
-        # So sánh migration history trên remote với các file local trong supabase/migrations/.
-        # Bất kỳ version nào trên remote mà không có file local tương ứng đều được
-        # đánh dấu là 'reverted' để CLI cho phép push migration mới.
         run: |
           PROJECT_REF="${{ secrets.PROD_SUPABASE_PROJECT_REF }}"
-
           LOCAL_VERSIONS=$(ls supabase/migrations/*.sql 2>/dev/null | grep -oE '[0-9]{14}' | sort | xargs)
           echo "Local versions: $LOCAL_VERSIONS"
-
           ORPHANED=$(node -e "
             const https = require('https');
             https.get({
