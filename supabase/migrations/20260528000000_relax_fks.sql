@@ -1,0 +1,11 @@
+-- Relax foreign keys to prevent sync crashes when ERP data has missing references
+ALTER TABLE meter_readings DROP CONSTRAINT IF EXISTS meter_readings_customer_id_fkey;
+ALTER TABLE meter_readings DROP CONSTRAINT IF EXISTS meter_readings_period_id_fkey;
+ALTER TABLE bills DROP CONSTRAINT IF EXISTS bills_customer_id_fkey;
+ALTER TABLE bills DROP CONSTRAINT IF EXISTS bills_reading_id_fkey;
+ALTER TABLE bills DROP CONSTRAINT IF EXISTS bills_period_id_fkey;
+ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_customer_id_fkey;
+ALTER TABLE payment_allocations DROP CONSTRAINT IF EXISTS payment_allocations_payment_id_fkey;
+ALTER TABLE payment_allocations DROP CONSTRAINT IF EXISTS payment_allocations_bill_id_fkey;
+ALTER TABLE payment_allocations DROP CONSTRAINT IF EXISTS payment_allocations_customer_id_fkey;
+ALTER TABLE customer_debt_snapshots DROP CONSTRAINT IF EXISTS customer_debt_snapshots_customer_id_fkey;
