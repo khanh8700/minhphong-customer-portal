@@ -40,7 +40,6 @@ export default async function UsagePage() {
                   <th>Chỉ số cũ</th>
                   <th>Chỉ số mới</th>
                   <th>Tiêu thụ</th>
-                  <th>Trạng thái</th>
                 </tr>
               </thead>
               <tbody>
@@ -51,9 +50,6 @@ export default async function UsagePage() {
                     <td data-label="Chỉ số cũ">{formatNumber(row.old_reading)}</td>
                     <td data-label="Chỉ số mới">{formatNumber(row.new_reading)}</td>
                     <td data-label="Tiêu thụ">{formatNumber(row.consumption, " m³")}</td>
-                    <td data-label="Trạng thái">
-                      <span className={`status ${statusClass(row.status)}`}>{statusLabel(row.status)}</span>
-                    </td>
                   </tr>
                 ))}
               </tbody>
