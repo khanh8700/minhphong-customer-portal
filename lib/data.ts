@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
 import type { Bill, CustomerSummary, DebtSnapshot, MeterReading, Payment } from "@/lib/types";
+import { getSystemSetting } from "@/lib/settings";
 
 export async function getCustomerSummary(customerId: string, supabase = createPortalAdminClient()): Promise<CustomerSummary | null> {
   const { data, error } = await supabase
@@ -53,12 +54,17 @@ export async function getDebtSnapshot(customerId: string, supabase = createPorta
 }
 
 export async function listBills(customerId: string, supabase = createPortalAdminClient()): Promise<Bill[]> {
+  const limitMonths = await getSystemSetting('data_history_months_limit', '12');
+  const startDate = new Date();
+  startDate.setMonth(startDate.getMonth() - parseInt(limitMonths as string, 10));
+
   const { data, error } = await supabase
     .from("bills")
     .select("*")
     .eq("customer_id", customerId)
+    .gte("source_created_at", startDate.toISOString())
     .order("source_created_at", { ascending: false, nullsFirst: false })
-    .limit(80);
+    .limit(100);
 
   if (error) throw new Error(error.message);
   
@@ -83,12 +89,17 @@ export async function getBillForCustomer(customerId: string, billId: string, sup
 }
 
 export async function listUsage(customerId: string, supabase = createPortalAdminClient()): Promise<MeterReading[]> {
+  const limitMonths = await getSystemSetting('data_history_months_limit', '12');
+  const startDate = new Date();
+  startDate.setMonth(startDate.getMonth() - parseInt(limitMonths as string, 10));
+
   const { data, error } = await supabase
     .from("meter_readings")
     .select("*")
     .eq("customer_id", customerId)
+    .gte("reading_time", startDate.toISOString())
     .order("reading_time", { ascending: false, nullsFirst: false })
-    .limit(60);
+    .limit(100);
 
   if (error) throw new Error(error.message);
   const readings = (data ?? []).map((row: any) => ({
@@ -109,12 +120,17 @@ export async function listUsage(customerId: string, supabase = createPortalAdmin
 }
 
 export async function listPayments(customerId: string, supabase = createPortalAdminClient()): Promise<Payment[]> {
+  const limitMonths = await getSystemSetting('data_history_months_limit', '12');
+  const startDate = new Date();
+  startDate.setMonth(startDate.getMonth() - parseInt(limitMonths as string, 10));
+
   const { data, error } = await supabase
     .from("payments")
     .select("id, customer_id, amount, payment_method_code, note, payment_date, status, source_created_at")
     .eq("customer_id", customerId)
+    .gte("payment_date", startDate.toISOString())
     .order("payment_date", { ascending: false, nullsFirst: false })
-    .limit(80);
+    .limit(100);
 
   if (error) throw new Error(error.message);
   return (data ?? []).map((row: any) => ({

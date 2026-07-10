@@ -10,7 +10,7 @@ import { createPortalAdminClient } from "@/lib/supabase/admin";
 
 const lookupSchema = z.object({
   customer_code: z.string().min(1).max(64),
-  phone: z.string().min(8).max(32)
+  phone: z.string().min(4).max(64)
 });
 
 const GENERIC_ERROR = "Không tìm thấy thông tin phù hợp. Vui lòng kiểm tra lại mã KH, SĐT hoặc liên hệ Hotline: 0359 613 267 để được hỗ trợ.";
@@ -28,10 +28,12 @@ export async function POST(req: NextRequest) {
   }
 
   const customerCode = normalizeCustomerCode(parsed.customer_code);
-  const phone = normalizeVietnamPhone(parsed.phone);
-  if (!phone) {
+  const rawAuthInput = parsed.phone.trim();
+
+  // Validate early if raw input is not even a potential password or phone
+  if (!rawAuthInput) {
     await logAudit(supabase, {
-      action: "lookup_failed_invalid_phone",
+      action: "lookup_failed_invalid_input",
       metadata: { customer_code: customerCode },
       ipHash,
       userAgent
@@ -60,12 +62,32 @@ export async function POST(req: NextRequest) {
 
   const { data: customer, error } = await supabase
     .from("customers")
-    .select("id, phone_normalized_values")
+    .select("id, customer_code, phone_normalized_values")
     .eq("customer_code_normalized", customerCode)
     .maybeSingle();
 
-  const phones = ((customer?.phone_normalized_values ?? []) as string[]) || [];
-  const matched = !error && customer && phones.includes(phone);
+  let matched = false;
+
+  if (!error && customer) {
+    const { data: auth } = await supabase
+      .from("customer_auth")
+      .select("hashed_password")
+      .eq("customer_code", customer.customer_code)
+      .maybeSingle();
+
+    if (auth && auth.hashed_password) {
+      // Bắt buộc dùng mật khẩu tuỳ chỉnh
+      const crypto = await import("@/lib/crypto");
+      matched = auth.hashed_password === crypto.sha256(rawAuthInput);
+    } else {
+      // Fallback về xác thực số điện thoại
+      const normalizedPhone = normalizeVietnamPhone(rawAuthInput);
+      if (normalizedPhone) {
+        const phones = ((customer.phone_normalized_values ?? []) as string[]) || [];
+        matched = phones.includes(normalizedPhone);
+      }
+    }
+  }
 
   if (!matched) {
     await logAudit(supabase, {
@@ -78,13 +100,13 @@ export async function POST(req: NextRequest) {
   }
 
   const session = await createLookupSession(supabase, {
-    customerId: customer.id as string,
+    customerId: customer!.id as string,
     ipHash,
     userAgent
   });
 
   await logAudit(supabase, {
-    customerId: customer.id as string,
+    customerId: customer!.id as string,
     action: "lookup_success",
     metadata: { customer_code: customerCode },
     ipHash,

@@ -48,10 +48,9 @@ export function LookupForm() {
         />
       </div>
       <div className="field">
-        <label htmlFor="phone">Số điện thoại đã đăng ký</label>
+        <label htmlFor="phone">Số điện thoại / Mật khẩu</label>
         <input
           id="phone"
-          inputMode="tel"
           autoComplete="off"
           value={phone}
           onChange={(event) => setPhone(event.target.value)}

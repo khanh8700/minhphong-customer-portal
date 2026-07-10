@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { Clock, Droplets, FileText, Wallet, User, Database, AlertCircle, MapPin } from "lucide-react";
+import { Clock, Droplets, FileText, Wallet, User, Database, AlertCircle, MapPin, ChevronRight } from "lucide-react";
+import { SessionWarning } from "@/components/SessionWarning";
 import { getCustomerSummary, listBills } from "@/lib/data";
 import { formatNumber, formatVnd, statusClass, statusLabel } from "@/lib/format";
 import { requirePortalSession } from "@/lib/session";
@@ -25,25 +26,25 @@ export default async function DashboardPage() {
   return (
     <main className="page section">
       <div className="grid top-cards" style={{ marginBottom: 24 }}>
-        <section className="card flex-row">
+        <section className="card flex-row info-card">
           <User size={20} color="var(--muted)" />
           <div>
             <div className="muted-text">Mã khách hàng</div>
             <span className="badge" style={{ fontSize: 16, padding: '4px 10px' }}>{customer?.customer_code}</span>
           </div>
         </section>
-        <section className="card flex-row">
+        <section className="card flex-row info-card">
           <Database size={20} color="var(--muted)" />
           <div>
             <div className="muted-text">Mã đồng hồ</div>
             <span className="badge" style={{ fontSize: 16, padding: '4px 10px' }}>{customer?.meter?.meter_code ?? "-"}</span>
           </div>
         </section>
-        <section className="card flex-row">
+        <section className="card flex-row info-card">
           <MapPin size={20} color="var(--muted)" />
           <div style={{ overflow: 'hidden', flex: 1, minWidth: 0 }}>
             <div className="muted-text">Địa chỉ</div>
-            <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }} title={customer?.address ?? "-"}>{customer?.address ?? "-"}</div>
+            <div style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }} title={customer?.address ?? "-"}>{customer?.address ?? "-"}</div>
           </div>
         </section>
       </div>
@@ -62,7 +63,7 @@ export default async function DashboardPage() {
                   <div className="muted-text">Kỳ hóa đơn</div>
                   <strong style={{ fontSize: 18, display: 'block' }}>{latestBill.billing_periods?.period_name ?? "-"}</strong>
                 </div>
-                <span className={`status ${statusClass(latestBill.status)}`}>{statusLabel(latestBill.status)}</span>
+                <span className={`status ${statusClass(latestBill.status)}`} style={{ padding: '6px 16px', fontSize: 14, fontWeight: 600, border: 'none', background: latestBill.status === 'PAID' ? '#dcfce7' : undefined, color: latestBill.status === 'PAID' ? '#166534' : undefined }}>{statusLabel(latestBill.status)}</span>
               </div>
               
               <div className="bill-metrics-grid">
@@ -80,7 +81,7 @@ export default async function DashboardPage() {
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   <div className="muted-text">Thành tiền</div>
-                  <strong style={{ color: 'var(--good)' }}>{formatVnd(latestBill.total_amount)}</strong>
+                  <strong style={{ color: 'var(--foreground)' }}>{formatVnd(latestBill.total_amount)}</strong>
                 </div>
               </div>
               
@@ -93,7 +94,7 @@ export default async function DashboardPage() {
                 </div>
                 <div className="summary-row highlight" style={{ marginTop: 8, fontWeight: 'bold' }}>
                   <span className="muted-text" style={{ color: 'inherit', fontSize: 16 }}>Tổng cần thanh toán:</span>
-                  <strong style={{ color: 'var(--danger)', fontSize: 20 }}>{formatVnd(totalDebt)}</strong>
+                  <strong style={{ color: totalDebt > 0 ? 'var(--danger)' : 'var(--success)', fontSize: 20 }}>{formatVnd(totalDebt)}</strong>
                 </div>
               </div>
 
@@ -146,20 +147,23 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid cols-3" style={{ marginTop: 24 }}>
-        <Link className="card" href="/bills">
+        <Link className="card action-card" href="/bills" style={{ position: 'relative' }}>
           <FileText size={22} color="var(--brand)" />
           <h3>Danh sách hóa đơn</h3>
           <p className="muted">Xem chi tiết từng kỳ và tải PDF.</p>
+          <div className="action-arrow"><ChevronRight size={20} /></div>
         </Link>
-        <Link className="card" href="/usage">
+        <Link className="card action-card" href="/usage" style={{ position: 'relative' }}>
           <Droplets size={22} color="var(--brand)" />
           <h3>Lịch sử dùng nước</h3>
           <p className="muted">Theo dõi chỉ số cũ, mới và tiêu thụ.</p>
+          <div className="action-arrow"><ChevronRight size={20} /></div>
         </Link>
-        <Link className="card" href="/payments">
+        <Link className="card action-card" href="/payments" style={{ position: 'relative' }}>
           <Wallet size={22} color="var(--brand)" />
           <h3>Lịch sử thanh toán</h3>
           <p className="muted">Xem khoản thu và phương thức đã ghi nhận.</p>
+          <div className="action-arrow"><ChevronRight size={20} /></div>
         </Link>
       </div>
 
@@ -173,6 +177,8 @@ export default async function DashboardPage() {
           Phiên tra cứu hết hạn lúc {new Date(session.expires_at).toLocaleTimeString("vi-VN")}
         </span>
       </div>
+
+      <SessionWarning expiresAt={session.expires_at} />
     </main>
   );
 }
