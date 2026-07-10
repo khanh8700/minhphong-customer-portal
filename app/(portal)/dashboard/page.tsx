@@ -41,7 +41,7 @@ export default async function DashboardPage() {
         </section>
         <section className="card flex-row">
           <MapPin size={20} color="var(--muted)" />
-          <div style={{ overflow: 'hidden' }}>
+          <div style={{ overflow: 'hidden', flex: 1, minWidth: 0 }}>
             <div className="muted-text">Địa chỉ</div>
             <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', display: 'block' }} title={customer?.address ?? "-"}>{customer?.address ?? "-"}</div>
           </div>
