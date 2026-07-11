@@ -22,13 +22,14 @@ export function LookupForm() {
       body: JSON.stringify({ customer_code: customerCode, phone })
     });
     const payload = await res.json().catch(() => ({}));
-    setLoading(false);
 
     if (!res.ok) {
+      setLoading(false);
       setError(payload.error || "Không thể tra cứu lúc này.");
       return;
     }
 
+    // Keep loading true while router navigates to avoid multiple clicks
     router.push("/dashboard");
     router.refresh();
   }
@@ -58,9 +59,26 @@ export function LookupForm() {
           required
         />
       </div>
-      <button className="primary-button" type="submit" disabled={loading} style={{ width: "100%", marginBottom: 16 }}>
-        <Search size={18} />
-        {loading ? "Đang kiểm tra" : "Tra cứu"}
+      <button 
+        className="primary-button" 
+        type="submit" 
+        disabled={loading} 
+        style={{ width: "100%", marginBottom: 16, opacity: loading ? 0.8 : 1, cursor: loading ? 'wait' : 'pointer' }}
+      >
+        {loading ? (
+          <>
+            <svg className="animate-spin" style={{ marginRight: 8, height: 18, width: 18 }} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Đang xử lý...
+          </>
+        ) : (
+          <>
+            <Search size={18} style={{ marginRight: 8 }} />
+            Tra cứu
+          </>
+        )}
       </button>
       
       <div style={{ textAlign: "center", fontSize: 14, color: "var(--muted-text)" }}>
