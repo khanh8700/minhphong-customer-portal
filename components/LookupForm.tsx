@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Search } from "lucide-react";
+import { Search, History } from "lucide-react";
 
 export function LookupForm() {
   const router = useRouter();
@@ -10,6 +10,16 @@ export function LookupForm() {
   const [phone, setPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("recentCustomerCodes");
+      if (stored) {
+        setHistory(JSON.parse(stored));
+      }
+    } catch (e) {}
+  }, []);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -30,6 +40,12 @@ export function LookupForm() {
     }
 
     // Keep loading true while router navigates to avoid multiple clicks
+    try {
+      const newHistory = [customerCode, ...history.filter(c => c !== customerCode)].slice(0, 3);
+      localStorage.setItem("recentCustomerCodes", JSON.stringify(newHistory));
+      setHistory(newHistory);
+    } catch (e) {}
+
     router.push("/dashboard");
     router.refresh();
   }
@@ -43,10 +59,33 @@ export function LookupForm() {
           id="customer_code"
           autoComplete="off"
           value={customerCode}
-          onChange={(event) => setCustomerCode(event.target.value)}
+          onChange={(event) => setCustomerCode(event.target.value.toUpperCase())}
           placeholder="VD: TTH307"
           required
         />
+        {history.length > 0 && (
+          <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: 'var(--muted-text)', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <History size={12} /> Gần đây:
+            </span>
+            {history.map((code) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => setCustomerCode(code)}
+                style={{ 
+                  fontSize: 12, padding: '2px 8px', borderRadius: 12, 
+                  backgroundColor: '#f1f5f9', border: '1px solid #e2e8f0', 
+                  color: '#334155', cursor: 'pointer', transition: 'all 0.2s'
+                }}
+                onMouseOver={(e) => (e.currentTarget.style.backgroundColor = '#e2e8f0')}
+                onMouseOut={(e) => (e.currentTarget.style.backgroundColor = '#f1f5f9')}
+              >
+                {code}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="field">
         <label htmlFor="phone">Số điện thoại / Mật khẩu</label>
