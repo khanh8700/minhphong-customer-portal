@@ -6,6 +6,8 @@ import ConfirmSubmitButton from "@/components/admin/ConfirmSubmitButton";
 import { Activity, KeyRound, Database, Plus, Ghost, Trash2, RotateCcw, Lock, Unlock, Edit, Settings } from "lucide-react";
 import CustomerAutocomplete from "@/components/admin/CustomerAutocomplete";
 import EditMappingButton from "@/components/admin/EditMappingButton";
+import ViewScadaDetailsButton from "@/components/admin/ViewScadaDetailsButton";
+import ViewScadaHistoryButton from "@/components/admin/ViewScadaHistoryButton";
 import { getSystemSetting } from "@/lib/settings";
 import Link from "next/link";
 
@@ -106,6 +108,8 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
                     <td style={{ color: 'var(--text-muted)' }}>{m.api_url}</td>
                     <td>
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                        <ViewScadaHistoryButton mappingId={m.id} customerCode={m.customer_code} />
+                        <ViewScadaDetailsButton mappingId={m.id} customerCode={m.customer_code} />
                         <TestApiButton apiUrl={m.api_url} />
                         <EditMappingButton mapping={m} />
                         <form action={deleteScadaMapping.bind(null, m.id)}>

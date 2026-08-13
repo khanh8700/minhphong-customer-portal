@@ -1,9 +1,11 @@
 import { requirePortalSession } from "@/lib/session";
 import { getCustomerSummary, getLatestBill } from "@/lib/data";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
-import { fetchScadaData } from "@/lib/scada";
-import { Activity, Battery, BatteryFull, Gauge, Droplets, Zap, AlertCircle, Calculator } from "lucide-react";
+import { fetchScadaData, formatScadaDelay, getScadaDataDelayMinutes, isScadaDataStale, type ScadaResponse } from "@/lib/scada";
+import { getScadaDailyProduction } from "@/lib/scada-history";
+import { Activity, Battery, BatteryFull, Gauge, Droplets, Zap, AlertCircle, AlertTriangle, Calculator } from "lucide-react";
 import { ScadaRefresher } from "@/components/ScadaRefresher";
+import { ScadaDailyProductionChart } from "@/components/ScadaDailyProductionChart";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +40,7 @@ export default async function ScadaPage() {
     );
   }
 
-  const scadaData = await fetchScadaData(mapping.api_url) as Record<string, any> | null;
+  const scadaData = await fetchScadaData(mapping.api_url);
 
   if (!scadaData) {
     return (
@@ -52,6 +54,10 @@ export default async function ScadaPage() {
     );
   }
 
+  const scadaDailyProduction = await getScadaDailyProduction(customer.customer_code, supabase);
+  const scadaDelayMinutes = getScadaDataDelayMinutes(scadaData.thoi_gian);
+  const isScadaStale = isScadaDataStale(scadaDelayMinutes);
+
   let formattedTime = scadaData.thoi_gian;
   if (typeof formattedTime === 'string') {
     const parts = formattedTime.split(" ");
@@ -62,14 +68,14 @@ export default async function ScadaPage() {
   }
 
   // Parse and group data
-  const flowKeys = ['Forward_flow_total', 'Reverse_flow_total', 'Net_flow_total', 'Flow_rate', 'Velocity'];
-  const deviceKeys = ['Internal_battery', 'External_battery'];
+  const flowKeys: Array<keyof ScadaResponse> = ['Forward_flow_total', 'Reverse_flow_total', 'Net_flow_total', 'Flow_rate', 'Velocity'];
+  const deviceKeys: Array<keyof ScadaResponse> = ['Internal_battery', 'External_battery'];
 
-  const getCardProps = (key: string, value: any) => {
+  const getCardProps = (key: keyof ScadaResponse, value: ScadaResponse[keyof ScadaResponse]) => {
     let Icon = Activity;
     let color = "#3b82f6";
     let bg = "#eff6ff";
-    let label = key;
+    let label: string = key;
     let isWarning = false;
     
     if (key.includes('Flow_rate')) { Icon = Gauge; color = "#0ea5e9"; bg = "#e0f2fe"; label = "Lưu lượng tức thời (m³/h)"; }
@@ -97,8 +103,7 @@ export default async function ScadaPage() {
     return { Icon, color, bg, label, isWarning };
   };
 
-  const renderCard = (key: string) => {
-    if (!(key in scadaData)) return null;
+  const renderCard = (key: keyof ScadaResponse) => {
     const value = scadaData[key];
     const { Icon, color, bg, label, isWarning } = getCardProps(key, value);
     
@@ -156,9 +161,35 @@ export default async function ScadaPage() {
           <Activity color="#3b82f6" /> Thông số ĐHĐT
         </h1>
         {formattedTime && (
-          <ScadaRefresher lastUpdated={formattedTime} />
+          <ScadaRefresher lastUpdated={formattedTime} delayMinutes={scadaDelayMinutes} />
         )}
       </div>
+
+      {isScadaStale && scadaDelayMinutes !== null && (
+        <section role="alert" style={{
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 16,
+          marginBottom: 24,
+          padding: '20px 24px',
+          border: '1px solid #fbbf24',
+          borderLeft: '6px solid #f59e0b',
+          borderRadius: 16,
+          color: '#92400e',
+          background: 'linear-gradient(135deg, #fffbeb, #fef3c7)',
+          boxShadow: '0 8px 20px rgba(180, 83, 9, 0.12)',
+        }}>
+          <div style={{ display: 'flex', width: 44, height: 44, flexShrink: 0, alignItems: 'center', justifyContent: 'center', borderRadius: 12, color: '#b45309', background: '#fef3c7' }}>
+            <AlertTriangle size={26} />
+          </div>
+          <div>
+            <h2 style={{ margin: '1px 0 6px', color: '#92400e', fontSize: 18 }}>Dữ liệu SCADA cập nhật chậm</h2>
+            <p style={{ margin: 0, color: '#a16207', fontSize: 14, lineHeight: 1.6 }}>
+              Thông số nhận được đã chậm <strong>{formatScadaDelay(scadaDelayMinutes)}</strong>, vượt ngưỡng cảnh báo 120 phút. Vui lòng kiểm tra kết nối thiết bị hoặc thử làm mới dữ liệu.
+            </p>
+          </div>
+        </section>
+      )}
 
       {latestBill && estimatedConsumption > 0 && (
         <div style={{ marginBottom: 32 }}>
@@ -201,6 +232,10 @@ export default async function ScadaPage() {
           </div>
         </div>
       )}
+
+      <div className="card" style={{ marginBottom: 32 }}>
+        <ScadaDailyProductionChart data={scadaDailyProduction} />
+      </div>
 
       <div style={{ marginBottom: 32 }}>
         <h2 style={{ fontSize: 18, marginBottom: 16, color: 'var(--ink)' }}>Lưu lượng nước</h2>

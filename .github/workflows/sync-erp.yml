@@ -39,3 +39,10 @@ jobs:
           else
             npx tsx scripts/sync.ts
           fi
+
+      - name: Capture SCADA hourly readings
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCADA_API_KEY: ${{ secrets.SCADA_API_KEY }}
+        run: npx tsx scripts/capture-scada.ts

@@ -36,6 +36,7 @@ Quy trình này giải quyết vấn đề giới hạn Cron của gói Vercel H
 
 - `PORTAL_URL`: Đường dẫn gốc của website trên Vercel (VD: `https://minhphong-portal.vercel.app`, **không có dấu `/` ở cuối**).
 - `CRON_SECRET`: Một chuỗi bảo mật ngẫu nhiên (Giống hệt biến `CRON_SECRET` đã cài trên Vercel) để xác thực, ngăn chặn người ngoài gọi trộm API đồng bộ.
+- `SCADA_API_KEY`: Khoá xác thực API SCADA. Workflow cũng lưu một ảnh chụp chỉ số mỗi giờ và tự xoá dữ liệu quá 3 tháng.
 
 ---
 
