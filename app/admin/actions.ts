@@ -18,6 +18,7 @@ import { createPortalAdminClient } from "@/lib/supabase/admin";
 import { requireAdminSession } from "@/lib/admin-session";
 import { fetchScadaData, type ScadaResponse } from "@/lib/scada";
 import { getScadaDailyProduction, type ScadaDailyProduction } from "@/lib/scada-history";
+import { deleteAuditLogsOlderThan } from "@/lib/audit";
 
 export type AdminScadaDetailsResult =
   | { success: true; customerCode: string; data: ScadaResponse }
@@ -195,6 +196,25 @@ export async function updateSystemSetting(key: string, value: unknown) {
 
   if (error) {
     console.error(error);
+  }
+
+  revalidatePath("/admin");
+}
+
+export async function deleteAuditLogs(mode: "all" | "keep_90_days") {
+  await requireAdminSession();
+  const supabase = createPortalAdminClient();
+
+  const { error } = mode === "all"
+    ? await supabase.from("audit_logs").delete()
+    : { error: null };
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (mode === "keep_90_days") {
+    await deleteAuditLogsOlderThan(supabase, 90);
   }
 
   revalidatePath("/admin");

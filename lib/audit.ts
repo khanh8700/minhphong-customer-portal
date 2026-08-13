@@ -1,5 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+export const AUDIT_LOG_RETENTION_DAYS = 180;
+
 type AuditInput = {
   customerId?: string | null;
   action: string;
@@ -22,3 +24,22 @@ export async function logAudit(supabase: SupabaseClient, input: AuditInput): Pro
   }
 }
 
+export async function deleteAuditLogsOlderThan(
+  supabase: SupabaseClient,
+  days: number,
+): Promise<number> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+
+  const { count, error } = await supabase
+    .from("audit_logs")
+    .delete({ count: "exact" })
+    .lt("created_at", cutoff.toISOString());
+
+  if (error) throw new Error(error.message);
+  return count ?? 0;
+}
+
+export async function cleanupExpiredAuditLogs(supabase: SupabaseClient): Promise<number> {
+  return deleteAuditLogsOlderThan(supabase, AUDIT_LOG_RETENTION_DAYS);
+}
