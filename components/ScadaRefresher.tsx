@@ -3,12 +3,11 @@
 import { RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useTransition } from "react";
-import { isScadaDataStale } from "@/lib/scada";
 
-export function ScadaRefresher({ lastUpdated, delayMinutes }: { lastUpdated: string; delayMinutes?: number | null }) {
+export function ScadaRefresher({ lastUpdated, delayMinutes, staleAfterMinutes = 120 }: { lastUpdated: string; delayMinutes?: number | null; staleAfterMinutes?: number }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
-  const isStale = isScadaDataStale(delayMinutes);
+  const isStale = delayMinutes !== null && delayMinutes !== undefined && delayMinutes > staleAfterMinutes;
 
   const handleRefresh = () => {
     startTransition(() => {

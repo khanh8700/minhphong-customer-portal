@@ -1,14 +1,17 @@
 import { requireAdminSession } from "@/lib/admin-session";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
-import { addScadaMapping, deleteScadaMapping, toggleCustomerAuth, resetCustomerPassword, deleteCustomerAuth, updateSystemSetting, deleteAuditLogs } from "./actions";
+import { acknowledgeSystemAlert, addScadaMapping, deleteScadaMapping, saveAdminUser, saveTelegramSettings, toggleAdminUser, toggleCustomerAuth, resetCustomerPassword, deleteCustomerAuth, updateSystemSetting, deleteAuditLogs } from "./actions";
 import TestApiButton from "@/components/admin/TestApiButton";
 import ConfirmSubmitButton from "@/components/admin/ConfirmSubmitButton";
-import { Activity, KeyRound, Database, Plus, Ghost, Trash2, RotateCcw, Lock, Unlock, Edit, Settings, ClipboardList, Filter, Search } from "lucide-react";
+import { Activity, KeyRound, Database, Plus, Ghost, Trash2, RotateCcw, Lock, Unlock, Edit, Settings, ClipboardList, Filter, Search, LayoutDashboard, BellRing, Shield, CheckCheck } from "lucide-react";
 import CustomerAutocomplete from "@/components/admin/CustomerAutocomplete";
 import EditMappingButton from "@/components/admin/EditMappingButton";
 import ViewScadaDetailsButton from "@/components/admin/ViewScadaDetailsButton";
 import ViewScadaHistoryButton from "@/components/admin/ViewScadaHistoryButton";
 import { getSystemSetting } from "@/lib/settings";
+import { getScadaAlertThresholds, getTelegramAlertConfig } from "@/lib/scada-operations";
+import TelegramTestButton from "@/components/admin/TelegramTestButton";
+import ExportScadaReportButton from "@/components/admin/ExportScadaReportButton";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +22,18 @@ const auditActionLabels: Record<string, string> = {
   lookup_failed_invalid_input: "Tra cứu thiếu dữ liệu",
   lookup_rate_limited: "Tra cứu bị giới hạn",
   download_invoice_pdf: "Tải PDF hóa đơn",
+  admin_add_scada_mapping: "Admin thêm mapping SCADA",
+  admin_update_scada_mapping: "Admin sửa mapping SCADA",
+  admin_delete_scada_mapping: "Admin xóa mapping SCADA",
+  admin_update_customer_auth: "Admin đổi quyền khách hàng",
+  admin_reset_customer_password: "Admin đặt lại mật khẩu",
+  admin_delete_customer_auth: "Admin xóa hồ sơ bảo mật",
+  admin_update_setting: "Admin đổi cài đặt",
+  admin_update_telegram: "Admin cấu hình Telegram",
+  admin_delete_audit_logs: "Admin xóa audit log",
+  admin_save_admin_user: "Admin lưu tài khoản quản trị",
+  admin_toggle_admin_user: "Admin đổi trạng thái admin",
+  admin_acknowledge_alert: "Admin tiếp nhận cảnh báo",
 };
 
 const auditActionColors: Record<string, { color: string; background: string }> = {
@@ -27,6 +42,11 @@ const auditActionColors: Record<string, { color: string; background: string }> =
   lookup_failed_invalid_input: { color: "#b45309", background: "#fef3c7" },
   lookup_rate_limited: { color: "#b91c1c", background: "#fee2e2" },
   download_invoice_pdf: { color: "#1d4ed8", background: "#dbeafe" },
+  admin_add_scada_mapping: { color: "#1d4ed8", background: "#dbeafe" },
+  admin_update_scada_mapping: { color: "#1d4ed8", background: "#dbeafe" },
+  admin_delete_scada_mapping: { color: "#b91c1c", background: "#fee2e2" },
+  admin_update_telegram: { color: "#0369a1", background: "#e0f2fe" },
+  admin_delete_audit_logs: { color: "#b91c1c", background: "#fee2e2" },
 };
 
 function formatAuditMetadata(metadata: unknown): string {
@@ -62,13 +82,20 @@ function getAuditCustomer(value: unknown): { customer_code: string | null; full_
   };
 }
 
-export default async function AdminPage(props: { searchParams: Promise<{ tab?: string; auditCustomer?: string; auditAction?: string; auditPeriod?: string }> }) {
+const roleLabels: Record<string, string> = {
+  system_admin: "Quản trị hệ thống",
+  scada_operator: "Vận hành SCADA",
+  accountant: "Kế toán / Báo cáo",
+  viewer: "Chỉ xem",
+};
+
+export default async function AdminPage(props: { searchParams: Promise<{ tab?: string; auditCustomer?: string; auditAction?: string; auditPeriod?: string; error?: string }> }) {
   const searchParams = await props.searchParams;
-  await requireAdminSession();
+  const adminSession = await requireAdminSession();
   
   const supabase = createPortalAdminClient();
 
-  const activeTab = searchParams.tab || 'scada';
+  const activeTab = searchParams.tab || 'dashboard';
   const auditCustomer = searchParams.auditCustomer?.trim().toUpperCase() ?? "";
   const auditAction = searchParams.auditAction?.trim() ?? "";
   const auditPeriod = ["1", "7", "30", "all"].includes(searchParams.auditPeriod ?? "")
@@ -89,6 +116,26 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
     customers: unknown;
   }> = [];
   let auditError: string | null = null;
+  let dashboardStatuses: Array<{ customer_code: string; status: string; last_checked_at: string; last_error: string | null; internal_battery: number | null; external_battery: number | null }> = [];
+  let openAlerts: Array<{ id: string; customer_code: string; type: string; severity: string; title: string; message: string; status: string; last_detected_at: string }> = [];
+  let telegramConfig = null as Awaited<ReturnType<typeof getTelegramAlertConfig>> | null;
+  let alertThresholds = null as Awaited<ReturnType<typeof getScadaAlertThresholds>> | null;
+  let adminUsers: Array<{ id: string; email: string; role: string; is_active: boolean; created_at: string }> = [];
+
+  if (activeTab === "dashboard") {
+    const [{ data: statuses }, { data: alerts }] = await Promise.all([
+      supabase.from("scada_device_statuses").select("customer_code, status, last_checked_at, last_error, internal_battery, external_battery").order("last_checked_at", { ascending: false }),
+      supabase.from("system_alerts").select("id, customer_code, type, severity, title, message, status, last_detected_at").in("status", ["open", "acknowledged"]).order("last_detected_at", { ascending: false }).limit(50),
+    ]);
+    dashboardStatuses = (statuses ?? []) as typeof dashboardStatuses;
+    openAlerts = (alerts ?? []) as typeof openAlerts;
+  }
+
+  if (activeTab === "settings") [telegramConfig, alertThresholds] = await Promise.all([getTelegramAlertConfig(supabase), getScadaAlertThresholds(supabase)]);
+  if (activeTab === "admins") {
+    const { data } = await supabase.from("admin_users").select("id, email, role, is_active, created_at").order("created_at", { ascending: true });
+    adminUsers = (data ?? []) as typeof adminUsers;
+  }
 
   if (activeTab === "audit") {
     try {
@@ -147,6 +194,9 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
     <div>
       {/* Tabs Navigation */}
       <div style={{ display: 'flex', gap: 12, marginBottom: 32, flexWrap: 'wrap' }}>
+        <Link href="/admin?tab=dashboard" style={tabStyle(activeTab === 'dashboard')}>
+          <LayoutDashboard size={18} /> Tổng quan SCADA
+        </Link>
         <Link href="/admin?tab=scada" style={tabStyle(activeTab === 'scada')}>
           <Activity size={18} /> Bản đồ SCADA
         </Link>
@@ -159,9 +209,38 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
         <Link href="/admin?tab=audit" style={tabStyle(activeTab === 'audit')}>
           <ClipboardList size={18} /> Nhật ký hoạt động
         </Link>
+        {adminSession.role === "system_admin" && <Link href="/admin?tab=admins" style={tabStyle(activeTab === 'admins')}>
+          <Shield size={18} /> Phân quyền admin
+        </Link>}
       </div>
 
+      {searchParams.error === "forbidden" && <div role="alert" className="error-box">Tài khoản hiện tại không có quyền thực hiện thao tác này.</div>}
+
       <div style={{ display: 'grid', gap: 32, gridTemplateColumns: '1fr' }}>
+
+      {activeTab === 'dashboard' && (
+      <section className="admin-card">
+        <div style={{ marginBottom: 28, display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+          <div style={{ padding: 12, background: 'linear-gradient(135deg, #e0f2fe, #dbeafe)', color: '#0284c7', borderRadius: 16 }}><LayoutDashboard size={28} /></div>
+          <div><h2 className="admin-section-title">Tổng quan vận hành SCADA</h2><p className="admin-section-desc">Theo dõi trạng thái đồng hồ, cảnh báo đang mở và lần kiểm tra gần nhất.</p></div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 14, marginBottom: 28 }}>
+          {[
+            ["Tổng đồng hồ", dashboardStatuses.length, '#0f172a', '#f8fafc'],
+            ["Trực tuyến", dashboardStatuses.filter((item) => item.status === 'online').length, '#047857', '#ecfdf5'],
+            ["Dữ liệu chậm", dashboardStatuses.filter((item) => item.status === 'stale').length, '#b45309', '#fffbeb'],
+            ["Mất kết nối", dashboardStatuses.filter((item) => item.status === 'offline').length, '#b91c1c', '#fef2f2'],
+            ["Cảnh báo mở", openAlerts.length, '#7c3aed', '#f5f3ff'],
+          ].map(([label, value, color, background]) => <div key={String(label)} style={{ padding: 18, borderRadius: 14, border: `1px solid ${background}`, background: String(background) }}><div style={{ color: '#64748b', fontSize: 13, fontWeight: 600 }}>{label}</div><div style={{ color: String(color), fontSize: 28, fontWeight: 750, marginTop: 6 }}>{value}</div></div>)}
+        </div>
+        <h3 style={{ margin: '0 0 14px', fontSize: 17 }}>Cần xử lý</h3>
+        <div className="admin-table-container">
+          <table className="admin-table"><thead><tr><th>Khách hàng</th><th>Cảnh báo</th><th>Thời điểm phát hiện</th><th style={{ textAlign: 'right' }}>Thao tác</th></tr></thead><tbody>
+            {openAlerts.length ? openAlerts.map((alert) => <tr key={alert.id}><td style={{ fontWeight: 700 }}>{alert.customer_code}</td><td><strong style={{ color: alert.severity === 'critical' ? '#b91c1c' : '#b45309' }}>{alert.title}</strong><div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>{alert.message}</div></td><td style={{ whiteSpace: 'nowrap', color: 'var(--text-muted)' }}>{formatAuditTime(alert.last_detected_at)}</td><td style={{ textAlign: 'right' }}>{alert.status === 'open' && <form action={acknowledgeSystemAlert.bind(null, alert.id)}><ConfirmSubmitButton promptMessage={`Xác nhận đã tiếp nhận cảnh báo của ${alert.customer_code}?`} className="admin-btn" style={{ padding: '8px 10px', color: '#047857', background: '#ecfdf5' }}><CheckCheck size={16} /> Đã tiếp nhận</ConfirmSubmitButton></form>}</td></tr>) : <tr><td colSpan={4}><div className="admin-table-empty"><CheckCheck size={42} strokeWidth={1} /><span>Không có cảnh báo đang mở.</span></div></td></tr>}
+          </tbody></table>
+        </div>
+      </section>
+      )}
       
       {/* SCADA Section */}
       {activeTab === 'scada' && (
@@ -211,6 +290,7 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
                     <td style={{ color: 'var(--text-muted)' }}>{m.api_url}</td>
                     <td>
                       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                        <ExportScadaReportButton customerCode={m.customer_code} />
                         <ViewScadaHistoryButton mappingId={m.id} customerCode={m.customer_code} />
                         <ViewScadaDetailsButton mappingId={m.id} customerCode={m.customer_code} />
                         <TestApiButton apiUrl={m.api_url} />
@@ -275,6 +355,29 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
             <Plus size={18} /> Cấp Quyền Đổi MK
           </ConfirmSubmitButton>
         </form>
+
+        {telegramConfig && (
+          <div style={{ marginTop: 24, padding: 24, borderRadius: 16, border: '1px solid #bae6fd', background: '#f8fbff' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 18 }}><BellRing size={22} color="#0284c7" /><div><h3 style={{ margin: 0, fontSize: 17 }}>Cảnh báo Telegram</h3><p style={{ margin: '4px 0 0', color: '#64748b', fontSize: 13 }}>Bot token được mã hóa khi lưu. Bỏ trống token để giữ nguyên token đã cấu hình.</p></div></div>
+            <form action={saveTelegramSettings} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14, alignItems: 'end' }}>
+              <div style={{ display: 'grid', gap: 7 }}><label htmlFor="telegramToken" style={{ fontSize: 13, fontWeight: 600, color: '#475569' }}>Bot Token</label><input id="telegramToken" name="botToken" type="password" placeholder={telegramConfig.bot_token_encrypted ? "Đã cấu hình — để trống để giữ nguyên" : "Dán Bot Token từ BotFather"} className="admin-input" autoComplete="new-password" /></div>
+              <div style={{ display: 'grid', gap: 7 }}><label htmlFor="telegramChatId" style={{ fontSize: 13, fontWeight: 600, color: '#475569' }}>Chat ID / Group ID</label><input id="telegramChatId" name="chatId" defaultValue={telegramConfig.chat_id} placeholder="Ví dụ: -1001234567890" className="admin-input" required /></div>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minHeight: 44, color: '#334155', fontWeight: 600 }}><input name="enabled" type="checkbox" defaultChecked={telegramConfig.enabled} /> Bật gửi Telegram</label>
+              <div style={{ gridColumn: '1 / -1', display: 'flex', flexWrap: 'wrap', gap: 16, padding: '12px 0' }}>
+                {[['alert_scada_offline', 'Mất kết nối', 'scada_offline'], ['alert_scada_stale', 'Dữ liệu chậm', 'scada_stale'], ['alert_battery_low', 'Pin yếu', 'battery_low'], ['alert_usage_anomaly', 'Dùng bất thường', 'usage_anomaly']].map(([name, label, key]) => <label key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: '#475569', fontSize: 13 }}><input name={name} type="checkbox" defaultChecked={telegramConfig.alert_types[key]} /> {label}</label>)}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, gridColumn: '1 / -1' }}><ConfirmSubmitButton promptMessage="Bạn có chắc chắn muốn lưu cấu hình Telegram?" className="admin-btn admin-btn-primary"><BellRing size={16} /> Lưu cấu hình Telegram</ConfirmSubmitButton><TelegramTestButton /></div>
+            </form>
+          </div>
+        )}
+
+        {alertThresholds && <div style={{ marginTop: 24, padding: 24, borderRadius: 16, border: '1px solid #e2e8f0', background: '#ffffff' }}>
+          <h3 style={{ margin: '0 0 16px', fontSize: 17 }}>Ngưỡng cảnh báo SCADA</h3>
+          <form action={async (formData: FormData) => { "use server"; await updateSystemSetting("scada_alert_thresholds", { stale_minutes: Number(formData.get("staleMinutes") ?? 120), battery_voltage: Number(formData.get("batteryVoltage") ?? 3.3), anomaly_multiplier: Number(formData.get("anomalyMultiplier") ?? 2), notification_cooldown_minutes: Number(formData.get("cooldownMinutes") ?? 360) }); }} style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 14, alignItems: 'end' }}>
+            {[['staleMinutes', 'Dữ liệu chậm (phút)', alertThresholds.stale_minutes, 1, 1440], ['batteryVoltage', 'Pin yếu (V)', alertThresholds.battery_voltage, 0.1, 10], ['anomalyMultiplier', 'Hệ số bất thường', alertThresholds.anomaly_multiplier, 1.1, 10], ['cooldownMinutes', 'Gửi lặp sau (phút)', alertThresholds.notification_cooldown_minutes, 15, 4320]].map(([name, label, value, min, max]) => <div key={String(name)} style={{ display: 'grid', gap: 7 }}><label htmlFor={String(name)} style={{ fontSize: 13, fontWeight: 600, color: '#475569' }}>{label}</label><input id={String(name)} name={String(name)} type="number" defaultValue={Number(value)} min={Number(min)} max={Number(max)} step={String(name) === 'batteryVoltage' || String(name) === 'anomalyMultiplier' ? '0.1' : '1'} className="admin-input" required /></div>)}
+            <ConfirmSubmitButton promptMessage="Bạn có chắc chắn muốn cập nhật ngưỡng cảnh báo SCADA?" className="admin-btn admin-btn-primary"><Edit size={16} /> Lưu ngưỡng</ConfirmSubmitButton>
+          </form>
+        </div>}
 
         <div className="admin-table-container">
           <table className="admin-table">
@@ -504,6 +607,21 @@ export default async function AdminPage(props: { searchParams: Promise<{ tab?: s
             </table>
           </div>
         )}
+      </section>
+      )}
+
+      {activeTab === 'admins' && adminSession.role === 'system_admin' && (
+      <section className="admin-card">
+        <div style={{ marginBottom: 28, display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+          <div style={{ padding: 12, background: 'linear-gradient(135deg, #e0e7ff, #ede9fe)', color: '#4f46e5', borderRadius: 16 }}><Shield size={28} /></div>
+          <div><h2 className="admin-section-title">Phân quyền quản trị</h2><p className="admin-section-desc">Mỗi email đăng nhập bằng mật khẩu quản trị chung sẽ nhận quyền tương ứng. Tài khoản đầu tiên được tạo là Quản trị hệ thống.</p></div>
+        </div>
+        <form action={saveAdminUser} style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'end', padding: 20, marginBottom: 24, borderRadius: 16, border: '1px dashed #c7d2fe', background: '#f8faff' }}>
+          <div style={{ flex: '1 1 260px', display: 'grid', gap: 7 }}><label htmlFor="adminEmail" style={{ fontSize: 13, fontWeight: 600, color: '#475569' }}>Email quản trị</label><input id="adminEmail" type="email" name="email" placeholder="admin@company.com" className="admin-input" required /></div>
+          <div style={{ flex: '1 1 220px', display: 'grid', gap: 7 }}><label htmlFor="adminRole" style={{ fontSize: 13, fontWeight: 600, color: '#475569' }}>Vai trò</label><select id="adminRole" name="role" defaultValue="viewer" className="admin-input">{Object.entries(roleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>
+          <ConfirmSubmitButton promptMessage="Bạn có chắc chắn muốn lưu tài khoản quản trị này?" className="admin-btn admin-btn-primary"><Plus size={16} /> Lưu tài khoản</ConfirmSubmitButton>
+        </form>
+        <div className="admin-table-container"><table className="admin-table"><thead><tr><th>Email</th><th>Vai trò</th><th>Trạng thái</th><th style={{ textAlign: 'right' }}>Thao tác</th></tr></thead><tbody>{adminUsers.length ? adminUsers.map((user) => <tr key={user.id}><td style={{ fontWeight: 600 }}>{user.email}{user.email === adminSession.email && <span style={{ marginLeft: 8, color: '#64748b', fontSize: 12 }}>(Bạn)</span>}</td><td><span className="admin-badge active">{roleLabels[user.role] ?? user.role}</span></td><td><span className={`admin-badge ${user.is_active ? 'success' : 'neutral'}`}>{user.is_active ? 'Đang hoạt động' : 'Đã khóa'}</span></td><td style={{ textAlign: 'right' }}>{user.email !== adminSession.email && <form action={toggleAdminUser.bind(null, user.id, !user.is_active)}><ConfirmSubmitButton promptMessage={`Bạn có chắc chắn muốn ${user.is_active ? 'khóa' : 'mở khóa'} tài khoản ${user.email}?`} className="admin-btn" style={{ padding: '8px 10px', color: user.is_active ? '#b91c1c' : '#047857', background: user.is_active ? '#fef2f2' : '#ecfdf5' }}>{user.is_active ? <Lock size={16} /> : <Unlock size={16} />}{user.is_active ? 'Khóa' : 'Mở khóa'}</ConfirmSubmitButton></form>}</td></tr>) : <tr><td colSpan={4}><div className="admin-table-empty"><Ghost size={48} strokeWidth={1} /><span>Chưa có tài khoản quản trị.</span></div></td></tr>}</tbody></table></div>
       </section>
       )}
       </div>

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 export default function AdminLogin() {
   const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("");
   const [error, setError] = useState("");
   const router = useRouter();
 
@@ -15,7 +16,7 @@ export default function AdminLogin() {
     const res = await fetch("/api/admin/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ email, password }),
     });
 
     if (!res.ok) {
@@ -31,6 +32,10 @@ export default function AdminLogin() {
       <h2 style={{ marginBottom: 16 }}>Đăng nhập Admin</h2>
       <form onSubmit={handleSubmit}>
         {error && <div className="error-box">{error}</div>}
+        <div className="field">
+          <label>Email quản trị</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+        </div>
         <div className="field">
           <label>Mật khẩu quản trị</label>
           <input 

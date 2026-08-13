@@ -15,10 +15,14 @@ export async function searchCustomersAction(query: string) {
   return data || [];
 }
 import { createPortalAdminClient } from "@/lib/supabase/admin";
-import { requireAdminSession } from "@/lib/admin-session";
+import { ADMIN_ROLES, requireAdminRole, requireAdminSession, type AdminRole } from "@/lib/admin-session";
 import { fetchScadaData, type ScadaResponse } from "@/lib/scada";
 import { getScadaDailyProduction, type ScadaDailyProduction } from "@/lib/scada-history";
 import { deleteAuditLogsOlderThan } from "@/lib/audit";
+import { logAudit } from "@/lib/audit";
+import { encryptSecret, decryptSecret } from "@/lib/secret";
+import { getTelegramAlertConfig } from "@/lib/scada-operations";
+import { sendTelegramMessage } from "@/lib/telegram";
 
 export type AdminScadaDetailsResult =
   | { success: true; customerCode: string; data: ScadaResponse }
@@ -29,7 +33,7 @@ export type AdminScadaHistoryResult =
   | { success: false; error: string };
 
 export async function addScadaMapping(formData: FormData) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin", "scada_operator"]);
   const customerCode = formData.get("customerCode")?.toString().trim();
   const apiUrl = formData.get("apiUrl")?.toString().trim();
 
@@ -47,12 +51,13 @@ export async function addScadaMapping(formData: FormData) {
     console.error(error);
     return;
   }
+  await logAudit(supabase, { action: "admin_add_scada_mapping", metadata: { customer_code: customerCode.toUpperCase(), admin: admin.email } });
 
   revalidatePath("/admin");
 }
 
 export async function updateScadaMapping(formData: FormData) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin", "scada_operator"]);
   const customerCode = formData.get("customerCode")?.toString().trim();
   const apiUrl = formData.get("apiUrl")?.toString().trim();
 
@@ -70,19 +75,21 @@ export async function updateScadaMapping(formData: FormData) {
     console.error(error);
     return;
   }
+  await logAudit(supabase, { action: "admin_update_scada_mapping", metadata: { customer_code: customerCode.toUpperCase(), admin: admin.email } });
 
   revalidatePath("/admin");
 }
 
 export async function deleteScadaMapping(id: string) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin", "scada_operator"]);
   const supabase = createPortalAdminClient();
   await supabase.from("scada_mappings").delete().eq("id", id);
+  await logAudit(supabase, { action: "admin_delete_scada_mapping", metadata: { mapping_id: id, admin: admin.email } });
   revalidatePath("/admin");
 }
 
 export async function toggleCustomerAuth(customerCode: string, canChange: boolean) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin"]);
   const supabase = createPortalAdminClient();
   
   // Upsert customer auth
@@ -94,30 +101,33 @@ export async function toggleCustomerAuth(customerCode: string, canChange: boolea
   if (error) {
     console.error(error);
   }
+  await logAudit(supabase, { action: "admin_update_customer_auth", metadata: { customer_code: customerCode, can_change_password: canChange, admin: admin.email } });
 
   revalidatePath("/admin");
 }
 
 export async function resetCustomerPassword(customerCode: string) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin"]);
   const supabase = createPortalAdminClient();
   
   await supabase.from("customer_auth").update({
     hashed_password: null,
   }).eq("customer_code", customerCode);
+  await logAudit(supabase, { action: "admin_reset_customer_password", metadata: { customer_code: customerCode, admin: admin.email } });
 
   revalidatePath("/admin");
 }
 
 export async function deleteCustomerAuth(customerCode: string) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin"]);
   const supabase = createPortalAdminClient();
   await supabase.from("customer_auth").delete().eq("customer_code", customerCode);
+  await logAudit(supabase, { action: "admin_delete_customer_auth", metadata: { customer_code: customerCode, admin: admin.email } });
   revalidatePath("/admin");
 }
 
 export async function testScadaApi(apiUrl: string) {
-  await requireAdminSession();
+  await requireAdminRole(["system_admin", "scada_operator"]);
   try {
     const data = await fetchScadaData(apiUrl);
     if (!data) return { error: "Không nhận được dữ liệu hợp lệ từ SCADA" };
@@ -128,7 +138,7 @@ export async function testScadaApi(apiUrl: string) {
 }
 
 export async function getScadaDetails(mappingId: string): Promise<AdminScadaDetailsResult> {
-  await requireAdminSession();
+  await requireAdminRole(["system_admin", "scada_operator", "viewer"]);
 
   if (!mappingId) {
     return { success: false, error: "Không xác định được mapping SCADA." };
@@ -161,7 +171,7 @@ export async function getScadaDetails(mappingId: string): Promise<AdminScadaDeta
 }
 
 export async function getScadaDailyProductionForAdmin(mappingId: string): Promise<AdminScadaHistoryResult> {
-  await requireAdminSession();
+  await requireAdminRole(["system_admin", "scada_operator", "viewer"]);
 
   const supabase = createPortalAdminClient();
   const { data: mapping, error } = await supabase
@@ -186,7 +196,7 @@ export async function getScadaDailyProductionForAdmin(mappingId: string): Promis
 }
 
 export async function updateSystemSetting(key: string, value: unknown) {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin"]);
   const supabase = createPortalAdminClient();
   const { error } = await supabase.from("system_settings").upsert({
     key: key,
@@ -197,12 +207,13 @@ export async function updateSystemSetting(key: string, value: unknown) {
   if (error) {
     console.error(error);
   }
+  await logAudit(supabase, { action: "admin_update_setting", metadata: { key, admin: admin.email } });
 
   revalidatePath("/admin");
 }
 
 export async function deleteAuditLogs(mode: "all" | "keep_90_days") {
-  await requireAdminSession();
+  const admin = await requireAdminRole(["system_admin"]);
   const supabase = createPortalAdminClient();
 
   const { error } = mode === "all"
@@ -217,5 +228,72 @@ export async function deleteAuditLogs(mode: "all" | "keep_90_days") {
     await deleteAuditLogsOlderThan(supabase, 90);
   }
 
+  await logAudit(supabase, { action: "admin_delete_audit_logs", metadata: { mode, admin: admin.email } });
+
+  revalidatePath("/admin");
+}
+
+export async function saveTelegramSettings(formData: FormData) {
+  const admin = await requireAdminRole(["system_admin"]);
+  const supabase = createPortalAdminClient();
+  const current = await getTelegramAlertConfig(supabase);
+  const token = formData.get("botToken")?.toString().trim();
+  const chatId = formData.get("chatId")?.toString().trim() ?? "";
+  const enabled = formData.get("enabled") === "on";
+  const alertTypes = {
+    scada_offline: formData.get("alert_scada_offline") === "on",
+    scada_stale: formData.get("alert_scada_stale") === "on",
+    battery_low: formData.get("alert_battery_low") === "on",
+    usage_anomaly: formData.get("alert_usage_anomaly") === "on",
+  };
+  const botTokenEncrypted = token ? encryptSecret(token) : current.bot_token_encrypted;
+
+  const { error } = await supabase.from("system_settings").upsert({
+    key: "telegram_alert_config",
+    value: { enabled, chat_id: chatId, bot_token_encrypted: botTokenEncrypted, alert_types: alertTypes },
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "key" });
+  if (error) throw new Error(error.message);
+  await logAudit(supabase, { action: "admin_update_telegram", metadata: { enabled, chat_id: chatId, admin: admin.email } });
+  revalidatePath("/admin");
+}
+
+export async function testTelegramSettings(): Promise<{ success: boolean; message: string }> {
+  await requireAdminRole(["system_admin"]);
+  const supabase = createPortalAdminClient();
+  const config = await getTelegramAlertConfig(supabase);
+  const token = decryptSecret(config.bot_token_encrypted);
+  if (!token) return { success: false, message: "Chưa có Bot Token Telegram hợp lệ." };
+  const result = await sendTelegramMessage(token, config.chat_id, "✅ Kết nối Telegram thành công. Hệ thống Customer Portal đã sẵn sàng gửi cảnh báo.");
+  return result.ok ? { success: true, message: "Đã gửi tin nhắn thử đến Telegram." } : { success: false, message: result.error };
+}
+
+export async function saveAdminUser(formData: FormData) {
+  const admin = await requireAdminRole(["system_admin"]);
+  const email = formData.get("email")?.toString().trim().toLowerCase();
+  const role = formData.get("role")?.toString() as AdminRole;
+  if (!email || !ADMIN_ROLES.includes(role)) throw new Error("Thông tin tài khoản quản trị không hợp lệ.");
+  const supabase = createPortalAdminClient();
+  const { error } = await supabase.from("admin_users").upsert({ email, role, is_active: true, updated_at: new Date().toISOString() }, { onConflict: "email" });
+  if (error) throw new Error(error.message);
+  await logAudit(supabase, { action: "admin_save_admin_user", metadata: { email, role, admin: admin.email } });
+  revalidatePath("/admin");
+}
+
+export async function toggleAdminUser(id: string, isActive: boolean) {
+  const admin = await requireAdminRole(["system_admin"]);
+  const supabase = createPortalAdminClient();
+  const { error } = await supabase.from("admin_users").update({ is_active: isActive, updated_at: new Date().toISOString() }).eq("id", id);
+  if (error) throw new Error(error.message);
+  await logAudit(supabase, { action: "admin_toggle_admin_user", metadata: { admin_user_id: id, is_active: isActive, admin: admin.email } });
+  revalidatePath("/admin");
+}
+
+export async function acknowledgeSystemAlert(id: string) {
+  const admin = await requireAdminRole(["system_admin", "scada_operator"]);
+  const supabase = createPortalAdminClient();
+  const { error } = await supabase.from("system_alerts").update({ status: "acknowledged", updated_at: new Date().toISOString() }).eq("id", id);
+  if (error) throw new Error(error.message);
+  await logAudit(supabase, { action: "admin_acknowledge_alert", metadata: { alert_id: id, admin: admin.email } });
   revalidatePath("/admin");
 }

@@ -1,6 +1,8 @@
-import { runErpSync } from "../lib/sync/run";
+import { loadEnvConfig } from "@next/env";
 
 async function main() {
+  loadEnvConfig(process.cwd());
+  const { runErpSync } = await import("../lib/sync/run");
   console.log("Starting ERP Data Sync...");
   // You can pass --full to force a full sync
   const full = process.argv.includes("--full");

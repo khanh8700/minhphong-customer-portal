@@ -1,6 +1,8 @@
-import { captureScadaHistory } from "../lib/scada-capture";
+import { loadEnvConfig } from "@next/env";
 
 async function main() {
+  loadEnvConfig(process.cwd());
+  const { captureScadaHistory } = await import("../lib/scada-capture");
   console.log("Starting hourly SCADA capture...");
   const result = await captureScadaHistory();
   console.log(`Captured ${result.captured} SCADA readings; deleted ${result.deleted} expired SCADA readings.`);

@@ -1,7 +1,11 @@
-import { cleanupExpiredAuditLogs } from "../lib/audit";
-import { createPortalAdminClient } from "../lib/supabase/admin";
+import { loadEnvConfig } from "@next/env";
 
 async function main() {
+  loadEnvConfig(process.cwd());
+  const [{ cleanupExpiredAuditLogs }, { createPortalAdminClient }] = await Promise.all([
+    import("../lib/audit"),
+    import("../lib/supabase/admin"),
+  ]);
   const deleted = await cleanupExpiredAuditLogs(createPortalAdminClient());
   console.log(`Deleted ${deleted} audit logs older than 180 days.`);
 }

@@ -38,6 +38,12 @@ Quy trình này giải quyết vấn đề giới hạn Cron của gói Vercel H
 - `CRON_SECRET`: Một chuỗi bảo mật ngẫu nhiên (Giống hệt biến `CRON_SECRET` đã cài trên Vercel) để xác thực, ngăn chặn người ngoài gọi trộm API đồng bộ.
 - `SCADA_API_KEY`: Khoá xác thực API SCADA. Workflow cũng lưu một ảnh chụp chỉ số mỗi giờ và tự xoá dữ liệu quá 3 tháng.
 
+### Cảnh báo Telegram và phân quyền admin
+
+- Cấu hình bot token và Chat ID trong **Admin → Cài đặt hệ thống → Cảnh báo Telegram**. Token được mã hóa bằng `SESSION_SECRET` trước khi lưu database; không thay đổi `SESSION_SECRET` sau khi đã cấu hình token.
+- Lần đăng nhập admin đầu tiên sau khi nâng cấp cần nhập email và mật khẩu quản trị. Email đó được khởi tạo làm **Quản trị hệ thống**, sau đó có thể cấp các vai trò khác trong **Admin → Phân quyền admin**.
+- Tác vụ SCADA theo giờ cập nhật trạng thái đồng hồ, cảnh báo và gửi Telegram theo các ngưỡng đã cấu hình.
+
 ---
 
 ## 3. Khởi chạy ở Môi trường Phát triển (Local)

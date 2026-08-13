@@ -1,9 +1,10 @@
 import { requirePortalSession } from "@/lib/session";
 import { getCustomerSummary, getLatestBill } from "@/lib/data";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
-import { fetchScadaData, formatScadaDelay, getScadaDataDelayMinutes, isScadaDataStale, type ScadaResponse } from "@/lib/scada";
+import { fetchScadaData, formatScadaDelay, getScadaDataDelayMinutes, type ScadaResponse } from "@/lib/scada";
 import { getScadaDailyProduction } from "@/lib/scada-history";
-import { Activity, Battery, BatteryFull, Gauge, Droplets, Zap, AlertCircle, AlertTriangle, Calculator } from "lucide-react";
+import { getScadaAlertThresholds } from "@/lib/scada-operations";
+import { Activity, Battery, BatteryFull, Gauge, Droplets, Zap, AlertCircle, AlertTriangle, Calculator, Download } from "lucide-react";
 import { ScadaRefresher } from "@/components/ScadaRefresher";
 import { ScadaDailyProductionChart } from "@/components/ScadaDailyProductionChart";
 
@@ -54,9 +55,19 @@ export default async function ScadaPage() {
     );
   }
 
-  const scadaDailyProduction = await getScadaDailyProduction(customer.customer_code, supabase);
+  const [scadaDailyProduction, alertThresholds] = await Promise.all([
+    getScadaDailyProduction(customer.customer_code, supabase),
+    getScadaAlertThresholds(supabase),
+  ]);
   const scadaDelayMinutes = getScadaDataDelayMinutes(scadaData.thoi_gian);
-  const isScadaStale = isScadaDataStale(scadaDelayMinutes);
+  const isScadaStale = scadaDelayMinutes !== null && scadaDelayMinutes > alertThresholds.stale_minutes;
+  const { data: activeAlerts } = await supabase
+    .from("system_alerts")
+    .select("id, title, message, severity")
+    .eq("customer_code", customer.customer_code)
+    .in("status", ["open", "acknowledged"])
+    .order("last_detected_at", { ascending: false })
+    .limit(3);
 
   let formattedTime = scadaData.thoi_gian;
   if (typeof formattedTime === 'string') {
@@ -161,9 +172,23 @@ export default async function ScadaPage() {
           <Activity color="#3b82f6" /> Thông số ĐHĐT
         </h1>
         {formattedTime && (
-          <ScadaRefresher lastUpdated={formattedTime} delayMinutes={scadaDelayMinutes} />
+          <ScadaRefresher lastUpdated={formattedTime} delayMinutes={scadaDelayMinutes} staleAfterMinutes={alertThresholds.stale_minutes} />
         )}
       </div>
+
+      {activeAlerts && activeAlerts.length > 0 && (
+        <div style={{ display: 'grid', gap: 12, marginBottom: 24 }}>
+          {activeAlerts.map((alert) => (
+            <section key={alert.id} role="alert" style={{ display: 'flex', gap: 14, alignItems: 'flex-start', padding: '16px 20px', border: `1px solid ${alert.severity === 'critical' ? '#fecaca' : '#fde68a'}`, borderLeft: `6px solid ${alert.severity === 'critical' ? '#ef4444' : '#f59e0b'}`, borderRadius: 14, background: alert.severity === 'critical' ? '#fff7f7' : '#fffbeb' }}>
+              <AlertTriangle size={23} color={alert.severity === 'critical' ? '#dc2626' : '#b45309'} style={{ flexShrink: 0, marginTop: 1 }} />
+              <div>
+                <strong style={{ color: alert.severity === 'critical' ? '#991b1b' : '#92400e' }}>{alert.title}</strong>
+                <p style={{ margin: '4px 0 0', color: '#a16207', fontSize: 14, lineHeight: 1.55 }}>{alert.message}</p>
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
 
       {isScadaStale && scadaDelayMinutes !== null && (
         <section role="alert" style={{
@@ -185,7 +210,7 @@ export default async function ScadaPage() {
           <div>
             <h2 style={{ margin: '1px 0 6px', color: '#92400e', fontSize: 18 }}>Dữ liệu SCADA cập nhật chậm</h2>
             <p style={{ margin: 0, color: '#a16207', fontSize: 14, lineHeight: 1.6 }}>
-              Thông số nhận được đã chậm <strong>{formatScadaDelay(scadaDelayMinutes)}</strong>, vượt ngưỡng cảnh báo 120 phút. Vui lòng kiểm tra kết nối thiết bị hoặc thử làm mới dữ liệu.
+              Thông số nhận được đã chậm <strong>{formatScadaDelay(scadaDelayMinutes)}</strong>, vượt ngưỡng cảnh báo {alertThresholds.stale_minutes} phút. Vui lòng kiểm tra kết nối thiết bị hoặc thử làm mới dữ liệu.
             </p>
           </div>
         </section>
@@ -234,6 +259,9 @@ export default async function ScadaPage() {
       )}
 
       <div className="card" style={{ marginBottom: 32 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+          <a href="/api/scada/report" className="secondary-button"><Download size={16} /> Tải CSV 3 tháng</a>
+        </div>
         <ScadaDailyProductionChart data={scadaDailyProduction} />
       </div>
 

@@ -1,6 +1,7 @@
 import { createPortalAdminClient } from "@/lib/supabase/admin";
 import { fetchScadaData } from "@/lib/scada";
 import { buildScadaHourlyReading, getScadaHistoryStartDate } from "@/lib/scada-history";
+import { detectUsageAnomaly, recordScadaStatus } from "@/lib/scada-operations";
 
 type ScadaMapping = {
   customer_code: string;
@@ -29,6 +30,7 @@ export async function captureScadaHistory(): Promise<ScadaCaptureResult> {
     try {
       const data = await fetchScadaData(mapping.api_url);
       if (!data) {
+        await recordScadaStatus({ supabase, customerCode: mapping.customer_code, error: "SCADA không trả dữ liệu hợp lệ" });
         failed.push({ customerCode: mapping.customer_code, error: "SCADA không trả dữ liệu hợp lệ" });
         continue;
       }
@@ -40,12 +42,16 @@ export async function captureScadaHistory(): Promise<ScadaCaptureResult> {
         });
 
       if (error) {
+        await recordScadaStatus({ supabase, customerCode: mapping.customer_code, data, error: error.message });
         failed.push({ customerCode: mapping.customer_code, error: error.message });
         continue;
       }
 
       captured += 1;
+      await recordScadaStatus({ supabase, customerCode: mapping.customer_code, data });
+      await detectUsageAnomaly(supabase, mapping.customer_code);
     } catch (error: unknown) {
+      await recordScadaStatus({ supabase, customerCode: mapping.customer_code, error: error instanceof Error ? error.message : "Lỗi không xác định" });
       failed.push({
         customerCode: mapping.customer_code,
         error: error instanceof Error ? error.message : "Lỗi không xác định",
