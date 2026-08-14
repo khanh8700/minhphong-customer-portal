@@ -124,6 +124,7 @@ body {
 .admin-table th {
   background: #f8fafc;
   color: var(--text-muted);
+  text-align: left;
   font-weight: 600;
   padding: 16px;
   text-transform: uppercase;

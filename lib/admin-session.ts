@@ -49,7 +49,13 @@ export async function setAdminSession(session: AdminSession) {
 
 export async function clearAdminSession() {
   const store = await cookies();
-  store.delete(ADMIN_COOKIE);
+  store.set(ADMIN_COOKIE, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    path: "/admin",
+    sameSite: "lax",
+    maxAge: 0,
+  });
 }
 
 export async function loginAdmin(email: string, password: string): Promise<boolean> {
