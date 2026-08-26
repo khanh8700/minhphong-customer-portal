@@ -1,15 +1,22 @@
 import { extractNormalizedPhones, maskPhone, normalizeCustomerCode } from "@/lib/phone";
 
-export function mapCustomer(row: any): Record<string, unknown> {
+export function mapCustomer(row: any): Record<string, unknown> | null {
+  if (!row || !row.id) return null;
+  const rawCode = typeof row.customer_code === "string" ? row.customer_code.trim() : "";
+  if (!rawCode) return null;
+
+  const normalizedCode = normalizeCustomerCode(rawCode);
+  if (!normalizedCode) return null;
+
   const normalizedPhones = extractNormalizedPhones(row.phone);
   const area = Array.isArray(row.area) ? row.area[0] : row.area;
   const route = Array.isArray(row.route) ? row.route[0] : row.route;
 
   return {
     id: row.id,
-    customer_code: row.customer_code,
-    customer_code_normalized: normalizeCustomerCode(row.customer_code ?? ""),
-    full_name: row.full_name,
+    customer_code: rawCode,
+    customer_code_normalized: normalizedCode,
+    full_name: row.full_name ?? "",
     address: row.address ?? null,
     phone_masked: maskPhone(row.phone),
     phone_normalized_values: normalizedPhones,

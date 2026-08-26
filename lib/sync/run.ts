@@ -172,11 +172,66 @@ async function syncEntity(input: {
 
     const mapped = rows.map(entity.mapper).filter((row): row is Record<string, unknown> => Boolean(row));
     if (mapped.length > 0) {
-      const { error: upsertError } = await portal.from(entity.portalTable).upsert(mapped);
-      if (upsertError) throw new Error(`${entity.name} upsert: ${upsertError.message}`);
-    }
+      if (entity.name === "customers") {
+        // 1. Deduplicate by customer_code_normalized within the batch (keeping the latest updated row)
+        const dedupedByCode = new Map<string, Record<string, unknown>>();
+        for (const item of mapped) {
+          const code = item.customer_code_normalized as string;
+          if (code) {
+            dedupedByCode.set(code, item);
+          }
+        }
 
-    total += mapped.length;
+        // Also ensure deduplication by ID
+        const dedupedById = new Map<string, Record<string, unknown>>();
+        for (const item of dedupedByCode.values()) {
+          dedupedById.set(item.id as string, item);
+        }
+        const finalMapped = Array.from(dedupedById.values());
+
+        // 2. Resolve conflicts where portal DB already contains customer_code_normalized under an older/different UUID
+        const codes = finalMapped.map((c) => c.customer_code_normalized as string);
+        if (codes.length > 0) {
+          const { data: existing } = await portal
+            .from("customers")
+            .select("id, customer_code_normalized")
+            .in("customer_code_normalized", codes);
+
+          if (existing && existing.length > 0) {
+            const codeToIncomingId = new Map(finalMapped.map((c) => [c.customer_code_normalized, c.id]));
+            const staleIdsToDelete = existing
+              .filter((row) => codeToIncomingId.get(row.customer_code_normalized) !== row.id)
+              .map((row) => row.id);
+
+            if (staleIdsToDelete.length > 0) {
+              await portal.from("customers").delete().in("id", staleIdsToDelete);
+            }
+          }
+        }
+
+        if (finalMapped.length > 0) {
+          const { error: upsertError } = await portal.from(entity.portalTable).upsert(finalMapped);
+          if (upsertError) throw new Error(`${entity.name} upsert: ${upsertError.message}`);
+          total += finalMapped.length;
+        }
+      } else {
+        // For other entities, deduplicate by primary key (id or customer_id) within the batch
+        const deduped = new Map<string, Record<string, unknown>>();
+        for (const item of mapped) {
+          const pk = (item.id ?? item.customer_id) as string;
+          if (pk) {
+            deduped.set(pk, item);
+          }
+        }
+        const finalMapped = Array.from(deduped.values());
+
+        if (finalMapped.length > 0) {
+          const { error: upsertError } = await portal.from(entity.portalTable).upsert(finalMapped);
+          if (upsertError) throw new Error(`${entity.name} upsert: ${upsertError.message}`);
+          total += finalMapped.length;
+        }
+      }
+    }
     const last = rows[rows.length - 1] as any;
     const lastWatermark = last?.[entity.watermarkColumn ?? entity.orderColumn];
     if (lastWatermark) latestWatermark = lastWatermark;

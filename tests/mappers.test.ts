@@ -14,10 +14,17 @@ describe("sync mappers", () => {
       credit_balance: 1000
     });
 
-    expect(mapped.customer_code_normalized).toBe("KH001");
-    expect(mapped.phone_normalized_values).toEqual(["0912345678", "0981111222"]);
-    expect(mapped.phone_masked).toBe("091****678");
+    expect(mapped?.customer_code_normalized).toBe("KH001");
+    expect(mapped?.phone_normalized_values).toEqual(["0912345678", "0981111222"]);
+    expect(mapped?.phone_masked).toBe("091****678");
     expect(mapped).not.toHaveProperty("phone");
+  });
+
+  it("returns null for customers with missing or empty customer_code", () => {
+    expect(mapCustomer({ id: "123", customer_code: null })).toBeNull();
+    expect(mapCustomer({ id: "123", customer_code: "" })).toBeNull();
+    expect(mapCustomer({ id: "123", customer_code: "   " })).toBeNull();
+    expect(mapCustomer({ customer_code: "KH001" })).toBeNull();
   });
 
   it("maps ERP invoices to portal bills", () => {
