@@ -11,6 +11,39 @@ import {
   mapPaymentAllocation
 } from "@/lib/sync/mappers";
 
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 2000;
+
+async function withRetry<T>(
+  fn: () => PromiseLike<T>,
+  label: string
+): Promise<T> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isRetryable =
+        /gateway.?timeout/i.test(message) ||
+        /timeout/i.test(message) ||
+        /502|503|504/i.test(message) ||
+        /fetch failed/i.test(message) ||
+        /ECONNRESET/i.test(message);
+
+      if (!isRetryable || attempt === MAX_RETRIES) {
+        throw err;
+      }
+
+      const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+      console.warn(
+        `[sync] ${label}: ${message} — retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw new Error(`${label}: exhausted retries`);
+}
+
 type SyncEntity = {
   name: string;
   portalTable: string;
@@ -107,11 +140,10 @@ export async function runErpSync(options: RunSyncOptions = {}) {
   const portal = options.portal ?? createPortalAdminClient();
   const batchSize = options.batchSize ?? 500;
   const mode = options.full ? "full" : "incremental";
-  const { data: run, error: runError } = await portal
-    .from("sync_runs")
-    .insert({ mode, status: "running" })
-    .select("id")
-    .single();
+  const { data: run, error: runError } = await withRetry(
+    () => portal.from("sync_runs").insert({ mode, status: "running" }).select("id").single(),
+    "sync_runs insert"
+  );
 
   if (runError) throw new Error(runError.message);
   const runId = run.id as string;
@@ -122,22 +154,26 @@ export async function runErpSync(options: RunSyncOptions = {}) {
       stats[entity.name] = await syncEntity({ entity, erp, portal, full: !!options.full, batchSize });
     }
 
-    await portal
-      .from("sync_runs")
-      .update({ status: "success", finished_at: new Date().toISOString(), stats })
-      .eq("id", runId);
+    await withRetry(
+      () => portal.from("sync_runs")
+        .update({ status: "success", finished_at: new Date().toISOString(), stats })
+        .eq("id", runId),
+      "sync_runs update success"
+    );
 
     return { runId, status: "success", stats };
   } catch (error) {
-    await portal
-      .from("sync_runs")
-      .update({
-        status: "failed",
-        finished_at: new Date().toISOString(),
-        stats,
-        error: error instanceof Error ? error.message : "Unknown sync error"
-      })
-      .eq("id", runId);
+    await withRetry(
+      () => portal.from("sync_runs")
+        .update({
+          status: "failed",
+          finished_at: new Date().toISOString(),
+          stats,
+          error: error instanceof Error ? error.message : "Unknown sync error"
+        })
+        .eq("id", runId),
+      "sync_runs update failed"
+    ).catch(() => {}); // best-effort — don't mask the original error
     throw error;
   }
 }
@@ -165,7 +201,7 @@ async function syncEntity(input: {
     const minDate = getEntityMinDate(entity, watermark, full);
     if (minDate) query = query.gte(entity.orderColumn, minDate);
 
-    const { data, error } = await query;
+    const { data, error } = await withRetry(() => query, `${entity.name} fetch`);
     if (error) throw new Error(`${entity.name}: ${error.message}`);
     const rows = data ?? [];
     if (rows.length === 0) break;
@@ -192,10 +228,10 @@ async function syncEntity(input: {
         // 2. Resolve conflicts where portal DB already contains customer_code_normalized under an older/different UUID
         const codes = finalMapped.map((c) => c.customer_code_normalized as string);
         if (codes.length > 0) {
-          const { data: existing } = await portal
-            .from("customers")
-            .select("id, customer_code_normalized")
-            .in("customer_code_normalized", codes);
+          const { data: existing } = await withRetry(
+            () => portal.from("customers").select("id, customer_code_normalized").in("customer_code_normalized", codes),
+            "customers conflict check"
+          );
 
           if (existing && existing.length > 0) {
             const codeToIncomingId = new Map(finalMapped.map((c) => [c.customer_code_normalized, c.id]));
@@ -204,13 +240,19 @@ async function syncEntity(input: {
               .map((row) => row.id);
 
             if (staleIdsToDelete.length > 0) {
-              await portal.from("customers").delete().in("id", staleIdsToDelete);
+              await withRetry(
+                () => portal.from("customers").delete().in("id", staleIdsToDelete),
+                "customers stale delete"
+              );
             }
           }
         }
 
         if (finalMapped.length > 0) {
-          const { error: upsertError } = await portal.from(entity.portalTable).upsert(finalMapped);
+          const { error: upsertError } = await withRetry(
+            () => portal.from(entity.portalTable).upsert(finalMapped),
+            `${entity.name} upsert`
+          );
           if (upsertError) throw new Error(`${entity.name} upsert: ${upsertError.message}`);
           total += finalMapped.length;
         }
@@ -226,7 +268,10 @@ async function syncEntity(input: {
         const finalMapped = Array.from(deduped.values());
 
         if (finalMapped.length > 0) {
-          const { error: upsertError } = await portal.from(entity.portalTable).upsert(finalMapped);
+          const { error: upsertError } = await withRetry(
+            () => portal.from(entity.portalTable).upsert(finalMapped),
+            `${entity.name} upsert`
+          );
           if (upsertError) throw new Error(`${entity.name} upsert: ${upsertError.message}`);
           total += finalMapped.length;
         }
@@ -240,11 +285,14 @@ async function syncEntity(input: {
   }
 
   if (latestWatermark && entity.watermarkColumn) {
-    await portal.from("sync_state").upsert({
-      entity: entity.name,
-      watermark: latestWatermark,
-      updated_at: new Date().toISOString()
-    });
+    await withRetry(
+      () => portal.from("sync_state").upsert({
+        entity: entity.name,
+        watermark: latestWatermark,
+        updated_at: new Date().toISOString()
+      }),
+      `${entity.name} watermark update`
+    );
   }
 
   return total;
@@ -252,11 +300,10 @@ async function syncEntity(input: {
 
 async function getWatermark(portal: SupabaseClient, entity: SyncEntity): Promise<string | null> {
   if (!entity.watermarkColumn && !entity.rollingWindowHours) return null;
-  const { data } = await portal
-    .from("sync_state")
-    .select("watermark")
-    .eq("entity", entity.name)
-    .maybeSingle();
+  const { data } = await withRetry(
+    () => portal.from("sync_state").select("watermark").eq("entity", entity.name).maybeSingle(),
+    `${entity.name} getWatermark`
+  );
   return (data?.watermark as string | null) ?? null;
 }
 
