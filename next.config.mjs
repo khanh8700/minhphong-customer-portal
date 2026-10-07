@@ -10,7 +10,7 @@ const nextConfig = {
           { key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains; preload' },
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' https://nuocsachdinhto.com https://www.nuocsachdinhto.com https://customer.nuocsachdinhto.com https://portal.nuocsachdinhto.com http://localhost:* http://127.0.0.1:*;"
+            value: "frame-ancestors *;"
           },
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
