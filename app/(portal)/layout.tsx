@@ -4,6 +4,8 @@ import { requirePortalSession } from "@/lib/session";
 
 import { Footer } from "@/components/Footer";
 
+import { PortalReadyNotifier } from "@/components/PortalReadyNotifier";
+
 export const dynamic = "force-dynamic";
 
 export default async function PortalLayout({ children }: { children: React.ReactNode }) {
@@ -28,6 +30,7 @@ export default async function PortalLayout({ children }: { children: React.React
 
   return (
     <div className="shell">
+      <PortalReadyNotifier />
       <PortalNav 
         customerName={customer?.full_name} 
         hasScada={hasScada} 

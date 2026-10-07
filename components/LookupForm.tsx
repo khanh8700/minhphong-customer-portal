@@ -4,13 +4,23 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Search, History } from "lucide-react";
 
-export function LookupForm() {
+interface LookupFormProps {
+  isAuto?: boolean;
+}
+
+export function LookupForm({ isAuto: initialIsAuto }: LookupFormProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [customerCode, setCustomerCode] = useState("");
-  const [phone, setPhone] = useState("");
+  const paramCode = searchParams.get("customer_code") || searchParams.get("code") || "";
+  const paramPhone = searchParams.get("phone") || "";
+  const auto = searchParams.get("auto");
+  const isAutoRequested = Boolean(initialIsAuto || ((auto === "1" || auto === "true") && paramCode));
+
+  const [customerCode, setCustomerCode] = useState(paramCode ? paramCode.toUpperCase() : "");
+  const [phone, setPhone] = useState(paramPhone);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(isAutoRequested);
+  const [isAutoLoading, setIsAutoLoading] = useState(isAutoRequested);
   const [history, setHistory] = useState<string[]>([]);
   const hasAutoSubmitted = useRef(false);
 
@@ -27,7 +37,13 @@ export function LookupForm() {
 
     if (!res.ok) {
       setLoading(false);
+      setIsAutoLoading(false);
       setError(payload.error || "Không thể tra cứu lúc này.");
+      try {
+        if (typeof window !== "undefined" && window.parent && window.parent !== window) {
+          window.parent.postMessage({ type: "PORTAL_LOOKUP_ERROR" }, "*");
+        }
+      } catch (e) {}
       return;
     }
 
@@ -49,22 +65,73 @@ export function LookupForm() {
     } catch (e) {}
 
     // Auto-fill and auto-submit from URL search params
-    const paramCode = searchParams.get("customer_code") || searchParams.get("code") || "";
-    const paramPhone = searchParams.get("phone") || "";
-    const auto = searchParams.get("auto");
+    const code = searchParams.get("customer_code") || searchParams.get("code") || "";
+    const ph = searchParams.get("phone") || "";
+    const autoParam = searchParams.get("auto");
 
-    if (paramCode) {
-      setCustomerCode(paramCode.toUpperCase());
+    if (code) {
+      setCustomerCode(code.toUpperCase());
     }
-    if (paramPhone) {
-      setPhone(paramPhone);
+    if (ph) {
+      setPhone(ph);
     }
 
-    if (paramCode && paramPhone && (auto === "1" || auto === "true") && !hasAutoSubmitted.current) {
+    if (code && ph && (autoParam === "1" || autoParam === "true") && !hasAutoSubmitted.current) {
       hasAutoSubmitted.current = true;
-      executeLookup(paramCode.toUpperCase(), paramPhone);
+      executeLookup(code.toUpperCase(), ph);
     }
   }, [searchParams]);
+
+  if (isAutoLoading && !error) {
+    return (
+      <div className="auto-lookup-loading" style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '50px 24px',
+        textAlign: 'center',
+        backgroundColor: '#ffffff',
+        borderRadius: '24px',
+        boxShadow: '0 20px 40px -15px rgba(0,0,0,0.06)',
+        border: '1px solid #e2e8f0',
+        width: '100%',
+        maxWidth: '440px',
+        margin: '0 auto'
+      }}>
+        <div style={{
+          width: '52px',
+          height: '52px',
+          border: '4px solid #e0f2fe',
+          borderTopColor: '#0284c7',
+          borderRadius: '50%',
+          animation: 'spin 0.8s linear infinite',
+          marginBottom: '20px'
+        }} />
+        <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#0f172a', marginBottom: '8px' }}>
+          Đang nạp dữ liệu hóa đơn...
+        </h2>
+        <div style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '6px',
+          padding: '4px 14px',
+          backgroundColor: '#f0f9ff',
+          border: '1px solid #bae6fd',
+          borderRadius: '16px',
+          color: '#0369a1',
+          fontWeight: 700,
+          fontSize: '0.875rem',
+          marginBottom: '14px'
+        }}>
+          Mã khách hàng: {customerCode || paramCode.toUpperCase()}
+        </div>
+        <p style={{ fontSize: '0.825rem', color: '#64748b', lineHeight: 1.5, margin: 0, maxWidth: '320px' }}>
+          Hệ thống đang tự động đồng bộ hóa đơn, công nợ &amp; sản lượng m³. Vui lòng đợi trong giây lát...
+        </p>
+      </div>
+    );
+  }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

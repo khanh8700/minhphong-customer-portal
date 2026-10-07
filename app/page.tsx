@@ -50,6 +50,22 @@ export default async function LookupPage(props: LookupPageProps) {
     }
   }
 
+  const isAuto = (auto === "1" || auto === "true") && Boolean(paramCode);
+
+  if (isAuto) {
+    return (
+      <main className="lookup-wrap" style={{ minHeight: '85vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+        <Suspense fallback={
+          <div style={{ textAlign: 'center', padding: 32, color: '#0284c7', fontWeight: 700 }}>
+            Đang khởi tạo cổng tra cứu...
+          </div>
+        }>
+          <LookupForm isAuto={true} />
+        </Suspense>
+      </main>
+    );
+  }
+
   return (
     <main className="lookup-wrap">
       <div className="page lookup-grid">
