@@ -37,8 +37,7 @@ export function LookupForm() {
       setHistory(newHistory);
     } catch (e) {}
 
-    router.push("/dashboard");
-    router.refresh();
+    window.location.href = "/dashboard";
   }
 
   useEffect(() => {

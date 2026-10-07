@@ -21,8 +21,7 @@ export function PortalNav({ customerName, hasScada, canChangePassword }: { custo
 
   async function logout() {
     await fetch("/api/session/logout", { method: "POST" });
-    router.push("/");
-    router.refresh();
+    window.location.href = "/";
   }
 
   return (

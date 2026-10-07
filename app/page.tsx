@@ -4,11 +4,51 @@ import { Droplets } from "lucide-react";
 import { LookupForm } from "@/components/LookupForm";
 import { getSessionFromCookies } from "@/lib/session";
 
+import { createPortalAdminClient } from "@/lib/supabase/admin";
+
 export const dynamic = "force-dynamic";
 
-export default async function LookupPage() {
+interface LookupPageProps {
+  searchParams?: Promise<{ [key: string]: string | string[] | undefined }>;
+}
+
+export default async function LookupPage(props: LookupPageProps) {
+  const params = props.searchParams ? await props.searchParams : {};
+  const paramCode = ((params?.code || params?.customer_code || "") as string).trim();
+  const auto = params?.auto;
+
   const session = await getSessionFromCookies().catch(() => null);
-  if (session) redirect("/dashboard");
+
+  if (session) {
+    if (!paramCode && !auto) {
+      // Direct visit without specific customer query -> go to active dashboard
+      redirect("/dashboard");
+    }
+
+    if (paramCode) {
+      // Check if active session belongs to this requested customer
+      try {
+        const supabase = createPortalAdminClient();
+        const { data: customer } = await supabase
+          .from("customers")
+          .select("customer_code, customer_code_normalized")
+          .eq("id", session.customer_id)
+          .maybeSingle();
+
+        const normalizedParamCode = paramCode.toUpperCase();
+        const currentCode = (customer?.customer_code || "").toUpperCase();
+        const currentCodeNorm = (customer?.customer_code_normalized || "").toUpperCase();
+
+        if (currentCode === normalizedParamCode || currentCodeNorm === normalizedParamCode) {
+          // Already authenticated as this exact customer
+          redirect("/dashboard");
+        }
+      } catch (err) {
+        // In case of error, allow LookupForm to proceed
+      }
+      // If DIFFERENT customer, DO NOT redirect! Let LookupForm authenticate the new customer!
+    }
+  }
 
   return (
     <main className="lookup-wrap">
