@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
 import { Droplets } from "lucide-react";
 import { LookupForm } from "@/components/LookupForm";
@@ -28,7 +29,9 @@ export default async function LookupPage() {
             tiêu thụ và lịch sử thanh toán.
           </p>
         </section>
-        <LookupForm />
+        <Suspense fallback={<div className="form-panel" style={{ padding: 24, textAlign: 'center', color: '#64748b' }}>Đang tải...</div>}>
+          <LookupForm />
+        </Suspense>
       </div>
     </main>
   );

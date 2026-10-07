@@ -1,35 +1,27 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Search, History } from "lucide-react";
 
 export function LookupForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [customerCode, setCustomerCode] = useState("");
   const [phone, setPhone] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
+  const hasAutoSubmitted = useRef(false);
 
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem("recentCustomerCodes");
-      if (stored) {
-        setHistory(JSON.parse(stored));
-      }
-    } catch (e) {}
-  }, []);
-
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function executeLookup(codeToLookup: string, phoneToLookup: string) {
     setError(null);
     setLoading(true);
 
     const res = await fetch("/api/lookup", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ customer_code: customerCode, phone })
+      body: JSON.stringify({ customer_code: codeToLookup, phone: phoneToLookup })
     });
     const payload = await res.json().catch(() => ({}));
 
@@ -39,15 +31,45 @@ export function LookupForm() {
       return;
     }
 
-    // Keep loading true while router navigates to avoid multiple clicks
     try {
-      const newHistory = [customerCode, ...history.filter(c => c !== customerCode)].slice(0, 3);
+      const newHistory = [codeToLookup, ...history.filter(c => c !== codeToLookup)].slice(0, 3);
       localStorage.setItem("recentCustomerCodes", JSON.stringify(newHistory));
       setHistory(newHistory);
     } catch (e) {}
 
     router.push("/dashboard");
     router.refresh();
+  }
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("recentCustomerCodes");
+      if (stored) {
+        setHistory(JSON.parse(stored));
+      }
+    } catch (e) {}
+
+    // Auto-fill and auto-submit from URL search params
+    const paramCode = searchParams.get("customer_code") || searchParams.get("code") || "";
+    const paramPhone = searchParams.get("phone") || "";
+    const auto = searchParams.get("auto");
+
+    if (paramCode) {
+      setCustomerCode(paramCode.toUpperCase());
+    }
+    if (paramPhone) {
+      setPhone(paramPhone);
+    }
+
+    if (paramCode && paramPhone && (auto === "1" || auto === "true") && !hasAutoSubmitted.current) {
+      hasAutoSubmitted.current = true;
+      executeLookup(paramCode.toUpperCase(), paramPhone);
+    }
+  }, [searchParams]);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    executeLookup(customerCode, phone);
   }
 
   return (
