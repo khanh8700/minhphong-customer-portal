@@ -20,6 +20,8 @@ export function mapCustomer(row: any): Record<string, unknown> | null {
     address: row.address ?? null,
     phone_masked: maskPhone(row.phone),
     phone_normalized_values: normalizedPhones,
+    email: row.email ?? null,
+    contract_id: row.contract_id ?? null,
     tax_code: row.tax_code ?? null,
     current_meter_id: row.current_meter_id ?? null,
     area_name: area?.name ?? null,
@@ -137,6 +139,26 @@ export function mapDebtSnapshot(row: any): Record<string, unknown> {
     debt_amount: Number(row.debt_amount ?? 0),
     credit_balance: Number(row.credit_balance ?? 0),
     source_refreshed_at: row.updated_at ?? row.last_refresh_at ?? null,
+    synced_at: new Date().toISOString()
+  };
+}
+
+export function mapContract(row: any): Record<string, unknown> | null {
+  if (!row || !row.id || !row.contract_number) return null;
+  return {
+    id: row.id,
+    customer_id: row.customer_id ?? null,
+    customer_code: row.customer_code,
+    contract_number: row.contract_number,
+    status: row.status,
+    template_code: row.template_code ?? null,
+    signing_channel: row.signing_channel ?? null,
+    customer_signer_type: row.customer_signer_type ?? null,
+    final_pdf_url: row.final_pdf_url ?? null,
+    paper_scan_pdf_url: row.paper_scan_pdf_url ?? null,
+    pdf_sha256: row.pdf_sha256 ?? null,
+    source_created_at: row.created_at ?? null,
+    source_updated_at: row.updated_at ?? row.created_at ?? null,
     synced_at: new Date().toISOString()
   };
 }

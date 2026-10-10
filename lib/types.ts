@@ -4,6 +4,8 @@ export type CustomerSummary = {
   full_name: string;
   address: string | null;
   phone_masked: string | null;
+  email: string | null;
+  contract_id?: string | null;
   area_name: string | null;
   route_name: string | null;
   status_bool: boolean | null;
@@ -71,5 +73,21 @@ export type PortalSession = {
   id: string;
   customer_id: string;
   expires_at: string;
+};
+
+export type PortalContract = {
+  id: string;
+  customer_id: string | null;
+  customer_code: string;
+  contract_number: string;
+  status: string;
+  template_code: string | null;
+  signing_channel: string | null;
+  customer_signer_type: string | null;
+  final_pdf_url: string | null;
+  paper_scan_pdf_url: string | null;
+  pdf_sha256: string | null;
+  source_created_at: string | null;
+  source_updated_at: string | null;
 };
 

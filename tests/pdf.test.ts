@@ -10,6 +10,7 @@ describe("invoice PDF", () => {
       full_name: "Nguyễn Văn A",
       address: "Dia chi test",
       phone_masked: "091****678",
+      email: null,
       area_name: null,
       route_name: null,
       status_bool: true,

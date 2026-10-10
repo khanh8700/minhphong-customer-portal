@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Search, History } from "lucide-react";
 
 interface LookupFormProps {
@@ -9,7 +9,6 @@ interface LookupFormProps {
 }
 
 export function LookupForm({ isAuto: initialIsAuto }: LookupFormProps) {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const paramCode = searchParams.get("customer_code") || searchParams.get("code") || "";
   const paramPhone = searchParams.get("phone") || "";
@@ -18,10 +17,26 @@ export function LookupForm({ isAuto: initialIsAuto }: LookupFormProps) {
 
   const [customerCode, setCustomerCode] = useState(paramCode ? paramCode.toUpperCase() : "");
   const [phone, setPhone] = useState(paramPhone);
+  const [prevParams, setPrevParams] = useState({ code: paramCode, phone: paramPhone });
+
+  if (prevParams.code !== paramCode || prevParams.phone !== paramPhone) {
+    setPrevParams({ code: paramCode, phone: paramPhone });
+    if (paramCode) setCustomerCode(paramCode.toUpperCase());
+    if (paramPhone) setPhone(paramPhone);
+  }
+
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(isAutoRequested);
   const [isAutoLoading, setIsAutoLoading] = useState(isAutoRequested);
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const stored = localStorage.getItem("recentCustomerCodes");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
   const hasAutoSubmitted = useRef(false);
 
   async function executeLookup(codeToLookup: string, phoneToLookup: string) {
@@ -43,7 +58,9 @@ export function LookupForm({ isAuto: initialIsAuto }: LookupFormProps) {
         if (typeof window !== "undefined" && window.parent && window.parent !== window) {
           window.parent.postMessage({ type: "PORTAL_LOOKUP_ERROR" }, "*");
         }
-      } catch (e) {}
+      } catch {
+        // Ignore message error
+      }
       return;
     }
 
@@ -51,35 +68,24 @@ export function LookupForm({ isAuto: initialIsAuto }: LookupFormProps) {
       const newHistory = [codeToLookup, ...history.filter(c => c !== codeToLookup)].slice(0, 3);
       localStorage.setItem("recentCustomerCodes", JSON.stringify(newHistory));
       setHistory(newHistory);
-    } catch (e) {}
+    } catch {
+      // Ignore storage error
+    }
 
     window.location.href = "/dashboard";
   }
 
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem("recentCustomerCodes");
-      if (stored) {
-        setHistory(JSON.parse(stored));
-      }
-    } catch (e) {}
-
-    // Auto-fill and auto-submit from URL search params
+    // Auto-submit from URL search params
     const code = searchParams.get("customer_code") || searchParams.get("code") || "";
     const ph = searchParams.get("phone") || "";
     const autoParam = searchParams.get("auto");
-
-    if (code) {
-      setCustomerCode(code.toUpperCase());
-    }
-    if (ph) {
-      setPhone(ph);
-    }
 
     if (code && ph && (autoParam === "1" || autoParam === "true") && !hasAutoSubmitted.current) {
       hasAutoSubmitted.current = true;
       executeLookup(code.toUpperCase(), ph);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   if (isAutoLoading && !error) {

@@ -1,18 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { Activity, KeyRound, BarChart3, FileText, Gauge, Home, LogOut, ReceiptText } from "lucide-react";
+import { usePathname } from "next/navigation";
+import { Activity, KeyRound, BarChart3, FileCheck, FileText, Gauge, Home, LogOut, ReceiptText } from "lucide-react";
 
 export function PortalNav({ customerName, hasScada, canChangePassword }: { customerName?: string | null, hasScada?: boolean, canChangePassword?: boolean }) {
   const pathname = usePathname();
-  const router = useRouter();
 
   const links = [
     { href: "/dashboard", label: "Tổng quan", icon: Home },
     { href: "/bills", label: "Hóa đơn", icon: FileText },
     { href: "/usage", label: "Sản lượng", icon: Gauge },
     { href: "/payments", label: "Thanh toán", icon: ReceiptText },
+    { href: "/contracts", label: "Hợp đồng", icon: FileCheck },
   ];
 
   if (hasScada) {

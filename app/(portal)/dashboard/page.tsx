@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { Clock, Droplets, FileText, Wallet, User, Database, AlertCircle, MapPin, ChevronRight } from "lucide-react";
+import { Clock, Droplets, FileCheck, FileText, Wallet, User, Database, AlertCircle, MapPin, ChevronRight } from "lucide-react";
 import { SessionWarning } from "@/components/SessionWarning";
-import { getCustomerSummary, listBills } from "@/lib/data";
+import { getCustomerSummary, getContractForCustomer, listBills } from "@/lib/data";
 import { formatNumber, formatVnd, statusClass, statusLabel } from "@/lib/format";
 import { requirePortalSession } from "@/lib/session";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
@@ -11,9 +11,10 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const session = await requirePortalSession();
   const supabase = createPortalAdminClient();
-  const [customer, bills] = await Promise.all([
+  const [customer, bills, contract] = await Promise.all([
     getCustomerSummary(session.customer_id, supabase),
-    listBills(session.customer_id, supabase)
+    listBills(session.customer_id, supabase),
+    getContractForCustomer(session.customer_id, supabase),
   ]);
 
   const latestBill = bills[0];
@@ -38,6 +39,17 @@ export default async function DashboardPage() {
           <div>
             <div className="muted-text">Mã đồng hồ</div>
             <span className="badge" style={{ fontSize: 16, padding: '4px 10px' }}>{customer?.meter?.meter_code ?? "-"}</span>
+          </div>
+        </section>
+        <section className="card flex-row info-card">
+          <FileCheck size={20} color="var(--muted)" />
+          <div style={{ overflow: 'hidden', flex: 1, minWidth: 0 }}>
+            <div className="muted-text">Hợp đồng</div>
+            <Link href="/contracts" style={{ textDecoration: 'none' }}>
+              <span className="badge" style={{ fontSize: 14, padding: '4px 10px', color: '#2563eb', cursor: 'pointer' }}>
+                {contract?.contract_number || "Tra cứu HĐ"}
+              </span>
+            </Link>
           </div>
         </section>
         <section className="card flex-row info-card">

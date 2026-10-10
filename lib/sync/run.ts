@@ -3,6 +3,7 @@ import { createErpReadClient, createPortalAdminClient } from "@/lib/supabase/adm
 import {
   mapBill,
   mapBillingPeriod,
+  mapContract,
   mapCustomer,
   mapDebtSnapshot,
   mapMeter,
@@ -60,7 +61,7 @@ const ENTITIES: SyncEntity[] = [
     name: "customers",
     portalTable: "customers",
     erpTable: "customers",
-    select: "id, customer_code, full_name, address, phone, tax_code, current_meter_id, status_bool, credit_balance, created_at, updated_at, area:area_id(name), route:route_id(name)",
+    select: "id, customer_code, full_name, address, phone, email, tax_code, current_meter_id, contract_id, status_bool, credit_balance, created_at, updated_at, area:area_id(name), route:route_id(name)",
     orderColumn: "updated_at",
     watermarkColumn: "updated_at",
     mapper: mapCustomer
@@ -125,6 +126,15 @@ const ENTITIES: SyncEntity[] = [
     orderColumn: "updated_at",
     watermarkColumn: "updated_at",
     mapper: mapDebtSnapshot
+  },
+  {
+    name: "contracts",
+    portalTable: "contracts",
+    erpTable: "contracts",
+    select: "id, customer_id, customer_code, contract_number, status, template_code, signing_channel, customer_signer_type, final_pdf_url, paper_scan_pdf_url, pdf_sha256, created_at, updated_at",
+    orderColumn: "updated_at",
+    watermarkColumn: "updated_at",
+    mapper: mapContract
   }
 ];
 

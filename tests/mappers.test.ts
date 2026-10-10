@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mapBill, mapCustomer, mapPaymentAllocation } from "@/lib/sync/mappers";
+import { mapBill, mapCustomer, mapPaymentAllocation, mapContract } from "@/lib/sync/mappers";
 
 describe("sync mappers", () => {
   it("maps ERP customer rows without exposing raw phone", () => {
@@ -55,6 +55,31 @@ describe("sync mappers", () => {
       bill_id: "bill-id",
       customer_id: "customer-id",
       allocated_amount: 50000
+    });
+  });
+
+  it("maps ERP contract rows to portal contracts", () => {
+    const mapped = mapContract({
+      id: "contract-123",
+      customer_id: "cust-1",
+      customer_code: "KH001",
+      contract_number: "HĐ-KH001",
+      status: "completed",
+      template_code: "01/HĐ-CNSH",
+      signing_channel: "remote_zalo",
+      customer_signer_type: "individual_draw",
+      final_pdf_url: "contracts/final_123.pdf",
+      pdf_sha256: "abc123sha"
+    });
+
+    expect(mapped).toMatchObject({
+      id: "contract-123",
+      customer_id: "cust-1",
+      customer_code: "KH001",
+      contract_number: "HĐ-KH001",
+      status: "completed",
+      final_pdf_url: "contracts/final_123.pdf",
+      pdf_sha256: "abc123sha"
     });
   });
 });

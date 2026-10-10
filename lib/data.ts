@@ -1,12 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createPortalAdminClient } from "@/lib/supabase/admin";
-import type { Bill, CustomerSummary, DebtSnapshot, MeterReading, Payment } from "@/lib/types";
+import type { Bill, CustomerSummary, DebtSnapshot, MeterReading, Payment, PortalContract } from "@/lib/types";
 import { getSystemSetting } from "@/lib/settings";
 
 export async function getCustomerSummary(customerId: string, supabase = createPortalAdminClient()): Promise<CustomerSummary | null> {
   const { data, error } = await supabase
     .from("customers")
-    .select("id, customer_code, full_name, address, phone_masked, area_name, route_name, status_bool, credit_balance, current_meter_id")
+    .select("id, customer_code, full_name, address, phone_masked, email, contract_id, area_name, route_name, status_bool, credit_balance, current_meter_id")
     .eq("id", customerId)
     .maybeSingle();
 
@@ -29,6 +29,8 @@ export async function getCustomerSummary(customerId: string, supabase = createPo
     full_name: row.full_name,
     address: row.address,
     phone_masked: row.phone_masked,
+    email: row.email ?? null,
+    contract_id: row.contract_id ?? null,
     area_name: row.area_name,
     route_name: row.route_name,
     status_bool: row.status_bool,
@@ -206,3 +208,41 @@ function numberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   return Number(value);
 }
+
+export async function getContractForCustomer(customerId: string, supabase = createPortalAdminClient()): Promise<PortalContract | null> {
+  const { data, error } = await supabase
+    .from("contracts")
+    .select("*")
+    .eq("customer_id", customerId)
+    .order("source_created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("Lỗi đọc hợp đồng từ portal DB:", error.message);
+    return null;
+  }
+  if (!data) return null;
+  return data as PortalContract;
+}
+
+export async function getContractSignedUrl(filePath: string): Promise<string> {
+  if (!filePath) return "";
+  if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
+    return filePath;
+  }
+  try {
+    const { createErpReadClient } = await import("@/lib/supabase/admin");
+    const erp = createErpReadClient();
+    const { data, error } = await erp.storage.from("contracts").createSignedUrl(filePath, 3600);
+    if (error || !data?.signedUrl) {
+      console.warn("Không thể sinh Signed URL hợp đồng từ ERP:", error?.message);
+      return "";
+    }
+    return data.signedUrl;
+  } catch (err) {
+    console.warn("Lỗi gọi ERP Storage sinh Signed URL:", err);
+    return "";
+  }
+}
+
