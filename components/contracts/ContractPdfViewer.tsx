@@ -9,14 +9,18 @@ import {
   Printer, 
   Maximize2, 
   Minimize2,
-  FileText
+  FileText,
+  ShieldCheck
 } from "lucide-react";
+import { CertificateDetailModal } from "./CertificateDetailModal";
 
 interface ContractPdfViewerProps {
   pdfUrl?: string | null;
   title?: string;
   className?: string;
   showToolbar?: boolean;
+  contract?: any;
+  onViewCert?: () => void;
 }
 
 export function ContractPdfViewer({
@@ -24,10 +28,13 @@ export function ContractPdfViewer({
   title = "Văn bản hợp đồng dịch vụ cấp nước",
   className = "",
   showToolbar = true,
+  contract,
+  onViewCert,
 }: ContractPdfViewerProps) {
   const [zoom, setZoom] = useState<number>(100);
   const [rotation, setRotation] = useState<number>(0);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [isCertModalOpen, setIsCertModalOpen] = useState<boolean>(false);
 
   const handleZoomIn = () => setZoom((prev) => Math.min(prev + 15, 175));
   const handleZoomOut = () => setZoom((prev) => Math.max(prev - 15, 60));
@@ -86,12 +93,12 @@ export function ContractPdfViewer({
         flexDirection: "column",
         backgroundColor: "#0f172a",
         border: "1px solid #334155",
-        borderRadius: isFullscreen ? 0 : 16,
+        borderRadius: isFullscreen ? 0 : 12,
         overflow: "hidden",
         boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.15)",
         ...(isFullscreen
           ? { position: "fixed", inset: 0, zIndex: 9999, height: "100vh" }
-          : { height: "100%", minHeight: 650 }),
+          : { height: "100%", minHeight: 0, flex: 1 }),
       }}
       className={className}
     >
@@ -102,22 +109,22 @@ export function ContractPdfViewer({
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
-            padding: "10px 16px",
+            padding: "8px 12px",
             backgroundColor: "#1e293b",
             borderBottom: "1px solid #334155",
             userSelect: "none",
-            flexWrap: "wrap",
             gap: 8,
+            flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#f8fafc", fontSize: 13, fontWeight: 600 }}>
-            <FileText size={16} color="#38bdf8" />
-            <span style={{ maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#f8fafc", fontSize: 12, fontWeight: 600, minWidth: 0 }}>
+            <FileText size={15} color="#38bdf8" style={{ flexShrink: 0 }} />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={title}>
               {title}
             </span>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
             {/* Zoom Controls */}
             <div
               style={{
@@ -126,7 +133,6 @@ export function ContractPdfViewer({
                 backgroundColor: "#0f172a",
                 borderRadius: 8,
                 padding: "2px 4px",
-                marginRight: 6,
               }}
             >
               <button
@@ -143,9 +149,9 @@ export function ContractPdfViewer({
                 }}
                 title="Thu nhỏ"
               >
-                <ZoomOut size={14} />
+                <ZoomOut size={13} />
               </button>
-              <span style={{ fontSize: 11, fontFamily: "monospace", color: "#e2e8f0", minWidth: 42, textAlign: "center" }}>
+              <span style={{ fontSize: 11, fontFamily: "monospace", color: "#e2e8f0", minWidth: 36, textAlign: "center" }}>
                 {zoom}%
               </span>
               <button
@@ -162,13 +168,14 @@ export function ContractPdfViewer({
                 }}
                 title="Phóng to"
               >
-                <ZoomIn size={14} />
+                <ZoomIn size={13} />
               </button>
             </div>
 
-            {/* Rotate */}
+            {/* Rotate (Desktop only) */}
             <button
               type="button"
+              className="hide-on-mobile"
               onClick={handleRotate}
               style={{
                 background: "#0f172a",
@@ -180,12 +187,13 @@ export function ContractPdfViewer({
               }}
               title="Xoay 90 độ"
             >
-              <RotateCw size={14} />
+              <RotateCw size={13} />
             </button>
 
-            {/* In */}
+            {/* In (Desktop only) */}
             <button
               type="button"
+              className="hide-on-mobile"
               onClick={handleNativePrint}
               style={{
                 background: "#0f172a",
@@ -197,7 +205,33 @@ export function ContractPdfViewer({
               }}
               title="In văn bản"
             >
-              <Printer size={14} />
+              <Printer size={13} />
+            </button>
+
+            {/* Tra cứu Chứng Thư Số */}
+            <button
+              type="button"
+              onClick={() => {
+                if (onViewCert) onViewCert();
+                else setIsCertModalOpen(true);
+              }}
+              style={{
+                background: "#065f46",
+                border: "1px solid #059669",
+                color: "#ecfdf5",
+                padding: "6px 9px",
+                borderRadius: 8,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 11.5,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+              title="Xem chi tiết chữ ký số & chứng thư số"
+            >
+              <ShieldCheck size={13} color="#34d399" />
+              <span className="hide-on-mobile">Chứng Thư</span>
             </button>
 
             {/* Tải về */}
@@ -208,19 +242,19 @@ export function ContractPdfViewer({
                 background: "#2563eb",
                 border: "none",
                 color: "#ffffff",
-                padding: "6px 10px",
+                padding: "6px 9px",
                 borderRadius: 8,
                 cursor: "pointer",
                 fontWeight: 600,
-                fontSize: 12,
+                fontSize: 11.5,
                 display: "inline-flex",
                 alignItems: "center",
                 gap: 4,
               }}
               title="Tải tệp PDF"
             >
-              <Download size={14} />
-              <span className="hidden sm:inline">Tải PDF</span>
+              <Download size={13} />
+              <span className="hide-on-mobile">Tải PDF</span>
             </button>
 
             {/* Fullscreen */}
@@ -237,7 +271,7 @@ export function ContractPdfViewer({
               }}
               title={isFullscreen ? "Thu nhỏ" : "Toàn màn hình"}
             >
-              {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
             </button>
           </div>
         </div>
@@ -253,8 +287,8 @@ export function ContractPdfViewer({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: 16,
-          backgroundColor: "#334155",
+          padding: 8,
+          backgroundColor: "#1e293b",
         }}
       >
         <div
@@ -264,20 +298,27 @@ export function ContractPdfViewer({
             transition: "transform 0.15s ease",
             width: "100%",
             maxWidth: 880,
-            height: isFullscreen ? "calc(100vh - 80px)" : "820px",
+            height: "100%",
+            minHeight: isFullscreen ? "calc(100vh - 80px)" : "600px",
             backgroundColor: "#ffffff",
-            boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.4)",
-            borderRadius: 4,
+            boxShadow: "0 20px 40px -10px rgba(0, 0, 0, 0.4)",
+            borderRadius: 6,
             overflow: "hidden",
           }}
         >
           <iframe
             src={`${pdfUrl}#toolbar=0&navpanes=0`}
             title={title}
-            style={{ width: "100%", height: "100%", border: "none" }}
+            style={{ width: "100%", height: "100%", minHeight: "100%", border: "none", display: "block" }}
           />
         </div>
       </div>
+
+      <CertificateDetailModal
+        isOpen={isCertModalOpen}
+        onClose={() => setIsCertModalOpen(false)}
+        contract={contract}
+      />
     </div>
   );
 }

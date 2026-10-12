@@ -146,7 +146,7 @@ export default async function ContractsPage() {
               Giá Trị Pháp Lý Hợp Đồng Điện Tử
             </h3>
             <p style={{ fontSize: 13, color: "#475569", lineHeight: 1.6, margin: 0 }}>
-              Hợp đồng được ký số bởi Công ty Cổ phần Nước sạch Minh Phong bằng Chứng thư số Viettel-CA và được Bên B (Khách hàng) xác nhận theo đúng quy định của Luật Giao dịch Điện tử số 20/2023/QH15. Tệp PDF có giá trị pháp lý tương đương bản hợp đồng giấy truyền thống có đóng dấu đỏ.
+              Hợp đồng được ký số bởi Công ty TNHH MTV đầu tư Minh Phong bằng Chứng thư số Viettel-CA và được Bên B (Khách hàng) xác nhận theo đúng quy định của Luật Giao dịch Điện tử số 20/2023/QH15. Tệp PDF có giá trị pháp lý tương đương bản hợp đồng giấy truyền thống có đóng dấu đỏ.
             </p>
           </section>
         </div>

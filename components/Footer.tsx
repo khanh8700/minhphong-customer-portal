@@ -36,7 +36,7 @@ export function Footer() {
           <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <li style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
               <MapPin size={18} color="var(--brand)" style={{ flexShrink: 0, marginTop: 2 }} />
-              <span style={{ lineHeight: 1.5 }}>Thôn Đại Trạch, phường Trí Quả, tỉnh Bắc Ninh</span>
+              <span style={{ lineHeight: 1.5 }}>Tổ dân phố Đại Trạch, phường Trí Quả, Thành phố Bắc Ninh</span>
             </li>
             <li style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Phone size={18} color="var(--brand)" style={{ flexShrink: 0 }} />

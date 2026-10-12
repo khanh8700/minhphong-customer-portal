@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getContractByToken } from "@/lib/erp-api";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ token: string }> }
@@ -14,5 +17,12 @@ export async function GET(
   if (result.success && result.data) {
     result.data.pdfUrl = `/api/portal/contracts/${token}/pdf`;
   }
-  return NextResponse.json(result, { status: result.success ? 200 : (result.error?.includes("410") ? 410 : 400) });
+  return NextResponse.json(result, {
+    status: result.success ? 200 : (result.error?.includes("410") ? 410 : 400),
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "0",
+    },
+  });
 }

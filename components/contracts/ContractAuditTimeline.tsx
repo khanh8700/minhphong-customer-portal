@@ -4,6 +4,7 @@ import {
   Clock,
   User,
   Monitor,
+  Maximize2,
 } from "lucide-react";
 import type { ContractAuditLogItem } from "@/lib/erp-api";
 
@@ -11,6 +12,7 @@ interface ContractAuditTimelineProps {
   logs?: ContractAuditLogItem[];
   isLoading?: boolean;
   className?: string;
+  onOpenDetailModal?: () => void;
 }
 
 const ACTION_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -51,6 +53,7 @@ export function ContractAuditTimeline({
   logs = [],
   isLoading = false,
   className = "",
+  onOpenDetailModal,
 }: ContractAuditTimelineProps) {
   if (isLoading) {
     return (
@@ -94,12 +97,38 @@ export function ContractAuditTimeline({
           }}
         >
           <Clock size={14} color="#2563eb" />
-          Lịch Sử Giao Kết (Audit Trail)
+          Lịch Sử Giao Kết ({logs.length})
         </h4>
-        <span style={{ fontSize: 11, color: "#16a34a", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "#16a34a" }} />
-          Bảo mật số
-        </span>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {onOpenDetailModal && (
+            <button
+              type="button"
+              onClick={onOpenDetailModal}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                backgroundColor: "#eff6ff",
+                border: "1px solid #bfdbfe",
+                color: "#2563eb",
+                padding: "3px 7px",
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+              title="Phóng to xem đầy đủ toàn bộ lịch sử giao kết"
+            >
+              <Maximize2 size={11} />
+              <span>Xem chi tiết</span>
+            </button>
+          )}
+          <span style={{ fontSize: 11, color: "#16a34a", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "#16a34a" }} />
+            Bảo mật số
+          </span>
+        </div>
       </div>
 
       <div style={{ position: "relative", paddingLeft: 22, display: "flex", flexDirection: "column", gap: 14 }}>

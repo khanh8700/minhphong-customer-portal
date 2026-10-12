@@ -14,11 +14,14 @@ import {
   Building2,
   X,
   Sparkles,
-  RefreshCw
+  RefreshCw,
+  Clock,
 } from "lucide-react";
 import { SignaturePad, SignaturePadRef } from "./SignaturePad";
 import { ContractPdfViewer } from "./ContractPdfViewer";
 import { ContractAuditTimeline } from "./ContractAuditTimeline";
+import { ContractAuditModal } from "./ContractAuditModal";
+import { CertificateDetailModal } from "./CertificateDetailModal";
 import type { ContractDetails, ContractAuditLogItem } from "@/lib/erp-api";
 
 interface ContractSignClientProps {
@@ -42,6 +45,24 @@ const CA_PROVIDERS = [
   { id: "other", name: "Nhà cung cấp khác / Dán PKCS#7 thủ công" },
 ];
 
+function parseCertDate(dateStr?: string | null): Date | null {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const s = dateStr.trim();
+  if (!s) return null;
+  const dmyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+  if (dmyMatch) {
+    const [, d, m, y, h = "0", min = "0", sec = "0"] = dmyMatch;
+    return new Date(Number(y), Number(m) - 1, Number(d), Number(h), Number(min), Number(sec));
+  }
+  const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const fallback = new Date(s);
+  return isNaN(fallback.getTime()) ? null : fallback;
+}
+
 export function ContractSignClient({
   initialToken,
   initialContract,
@@ -54,6 +75,13 @@ export function ContractSignClient({
 
   // Modal ký số (cho mobile hoặc khi bấm nút ký ở header)
   const [isSignModalOpen, setIsSignModalOpen] = useState(false);
+  // Modal xem chi tiết lịch sử giao kết (Audit Trail)
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  // Modal xem chi tiết chứng thư số PAdES
+  const [isCertModalOpen, setIsCertModalOpen] = useState(false);
+
+  // Tab điều hướng trên Mobile WebApp: 'pdf' (xem văn bản) | 'sign' (ký số) | 'history' (lịch sử)
+  const [mobileTab, setMobileTab] = useState<"pdf" | "sign" | "history">("pdf");
 
   // OTP state
   const [otpCode, setOtpCode] = useState("");
@@ -63,9 +91,12 @@ export function ContractSignClient({
   const [otpMessage, setOtpMessage] = useState<string | null>(null);
 
   // Signing state
+  const isStatusCompleted = (s?: string | null) => s === "completed" || s === "signed";
   const [signing, setSigning] = useState(false);
-  const [signedSuccess, setSignedSuccess] = useState(contract?.status === "completed");
-  const [pdfVersion, setPdfVersion] = useState<number>(Date.now());
+  const [signedSuccess, setSignedSuccess] = useState(
+    isStatusCompleted(initialContract?.status)
+  );
+  const [pdfVersion, setPdfVersion] = useState<number>(0);
 
   // Business B2B USB token state
   const [b2bTaxCode, setB2bTaxCode] = useState(
@@ -77,6 +108,8 @@ export function ContractSignClient({
   const [b2bCertSerial, setB2bCertSerial] = useState("");
   const [b2bCertIssuer, setB2bCertIssuer] = useState("");
   const [b2bCertValidRange, setB2bCertValidRange] = useState("");
+  const [b2bCertValidTo, setB2bCertValidTo] = useState("");
+  const [b2bCertIsExpired, setB2bCertIsExpired] = useState(false);
   const [usbSessionId, setUsbSessionId] = useState("");
   const [usbActiveUrl, setUsbActiveUrl] = useState("");
   const [b2bPkcs7, setB2bPkcs7] = useState("");
@@ -107,52 +140,45 @@ export function ContractSignClient({
   const refreshContractData = async () => {
     try {
       setPdfVersion(Date.now());
-      const res = await fetch(`/api/portal/contracts/${initialToken}`);
+      const res = await fetch(`/api/portal/contracts/${initialToken}?_t=${Date.now()}`, {
+        cache: "no-store",
+        headers: {
+          "Cache-Control": "no-cache",
+          "Pragma": "no-cache",
+        },
+      });
       const data = await res.json();
       if (data.success && data.data) {
         setContract(data.data);
         if (data.data.auditLogs) {
           setAuditLogs(data.data.auditLogs);
         }
-        setSignedSuccess(data.data.status === "completed");
+        if (isStatusCompleted(data.data.status)) {
+          setSignedSuccess(true);
+        }
       }
     } catch {
       // ignore
     }
   };
 
-  // Fetch contract data if not loaded
+  // Luôn đồng bộ dữ liệu khi initialContract prop thay đổi
   useEffect(() => {
-    if (!contract && !error) {
-      fetch(`/api/portal/contracts/${initialToken}`)
-        .then((res) => res.json())
-        .then((res) => {
-          if (res.success && res.data) {
-            setContract(res.data);
-            if (res.data.customer?.taxCode || res.data.customerCode) {
-              setB2bTaxCode(res.data.customer?.taxCode || res.data.customerCode || "");
-            }
-            if (res.data.customer?.fullName) {
-              setB2bCompanyName(res.data.customer.fullName);
-            }
-            if (res.data.auditLogs) {
-              setAuditLogs(res.data.auditLogs);
-            }
-            if (res.data.status === "completed") {
-              setSignedSuccess(true);
-            }
-          } else {
-            setError(res.error || "Không tìm thấy hồ sơ hợp đồng");
-          }
-        })
-        .catch((err) => {
-          setError(`Lỗi kết nối máy chủ: ${err.message || String(err)}`);
-        })
-        .finally(() => {
-          setLoading(false);
-        });
+    if (initialContract) {
+      setContract(initialContract);
+      if (initialContract.auditLogs) {
+        setAuditLogs(initialContract.auditLogs);
+      }
+      if (isStatusCompleted(initialContract.status)) {
+        setSignedSuccess(true);
+      }
     }
-  }, [initialToken, contract, error]);
+  }, [initialContract]);
+
+  // Luôn làm tươi dữ liệu một lần khi component mount ở Client
+  useEffect(() => {
+    refreshContractData();
+  }, [initialToken]);
 
   // Handle OTP countdown
   useEffect(() => {
@@ -229,6 +255,7 @@ export function ContractSignClient({
       const data = await res.json();
       if (res.ok && data.success) {
         setSignedSuccess(true);
+        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -349,6 +376,11 @@ export function ContractSignClient({
             postSignPlugin(baseUrl, "/getCertExpireDate", {}, 5000),
           ]);
 
+          const parsedExp = parseCertDate(expireDate);
+          const isExpired = parsedExp ? parsedExp.getTime() < Date.now() : false;
+          const parsedVal = parseCertDate(validDate);
+          const isNotYetValid = parsedVal ? parsedVal.getTime() > Date.now() : false;
+
           // Trích xuất MST từ DN nếu có (VD: MST:2301081775 hoặc UID=MST:2301081775)
           const mstMatch = dn.match(/MST[:=]([0-9\-]+)/i);
           if (mstMatch && mstMatch[1]) {
@@ -359,10 +391,28 @@ export function ContractSignClient({
           }
           setB2bCertSerial(snb || "");
           setB2bCertIssuer(issuer || (selectedCaProvider !== "auto" ? selectedCaProvider : "Viettel-CA"));
+          setB2bCertValidTo(expireDate || "");
           if (validDate || expireDate) {
             setB2bCertValidRange(`${validDate || ""} - ${expireDate || ""}`);
           }
 
+          if (isExpired || isNotYetValid) {
+            setB2bCertIsExpired(true);
+            setUsbActiveUrl("");
+            setUsbSessionId("");
+            setB2bPkcs7("");
+            setUsbStatusType("error");
+            const errDetail = isExpired
+              ? `Chứng thư số đã chọn đã HẾT HẠN vào ngày ${expireDate}`
+              : `Chứng thư số chưa đến ngày có hiệu lực (${validDate})`;
+            const errMsg = `⚠️ ${errDetail}. Vui lòng cắm đúng USB Token còn hạn và chọn chứng thư số mới trong cửa sổ Select Certificate.`;
+            setUsbStatus(errMsg);
+            setFormError(errMsg);
+            setIsConnectingUsb(false);
+            return;
+          }
+
+          setB2bCertIsExpired(false);
           // Lưu phiên SignPlugin để khi bấm "Ký Số Doanh Nghiệp (B2B)" ở Bước 2 sẽ gọi /signHash bật cửa sổ nhập PIN
           setUsbActiveUrl(baseUrl);
           setUsbSessionId(sessionId);
@@ -410,14 +460,56 @@ export function ContractSignClient({
       ws.onmessage = (event) => {
         try {
           const resp = JSON.parse(event.data);
-          if (resp.certificates && resp.certificates.length > 0) {
-            const cert = resp.certificates[0];
-            setB2bCompanyName(cert.subject || "");
-            setB2bCertSerial(cert.serialNumber || cert.serial || "");
-            setB2bCertIssuer(cert.issuer || selectedCaProvider);
-            setB2bPkcs7(cert.signature || cert.certBase64 || "USB_TOKEN_CERT_READY");
+          const rawCerts = (resp.certificates || []) as Array<{
+            subject?: string;
+            serialNumber?: string;
+            serial?: string;
+            issuer?: string;
+            validFrom?: string;
+            validTo?: string;
+            expireDate?: string;
+            signature?: string;
+            certBase64?: string;
+          }>;
+
+          if (rawCerts.length > 0) {
+            const now = Date.now();
+            const analyzedCerts = rawCerts.map((c) => {
+              const expDateStr = c.validTo || c.expireDate || '';
+              const exp = parseCertDate(expDateStr);
+              const isExp = exp ? exp.getTime() < now : false;
+              return { ...c, expDateStr, parsedExp: exp, isExpired: isExp };
+            });
+
+            // Ưu tiên chứng thư còn hiệu lực và thời hạn dài nhất
+            const validCerts = analyzedCerts
+              .filter((c) => !c.isExpired)
+              .sort((a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0));
+
+            if (validCerts.length === 0) {
+              const latestExpired = analyzedCerts.sort(
+                (a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0)
+              )[0];
+              setB2bCertIsExpired(true);
+              setUsbStatusType("error");
+              const msg = `⚠️ Tất cả chứng thư số trong USB Token đều đã hết hạn (chứng thư gần nhất hết hạn ngày ${latestExpired.expDateStr || 'N/A'}). Vui lòng liên hệ nhà cung cấp chữ ký số để gia hạn.`;
+              setUsbStatus(msg);
+              setFormError(msg);
+              return;
+            }
+
+            const activeCert = validCerts[0];
+            setB2bCertIsExpired(false);
+            setB2bCompanyName(activeCert.subject || "");
+            setB2bCertSerial(activeCert.serialNumber || activeCert.serial || "");
+            setB2bCertIssuer(activeCert.issuer || selectedCaProvider);
+            setB2bCertValidTo(activeCert.expDateStr || "");
+            if (activeCert.validFrom || activeCert.expDateStr) {
+              setB2bCertValidRange(`${activeCert.validFrom || ""} - ${activeCert.expDateStr || ""}`);
+            }
+            setB2bPkcs7(activeCert.signature || activeCert.certBase64 || "USB_TOKEN_CERT_READY");
             setUsbStatusType("success");
-            setUsbStatus(`Đã nhận diện chứng thư: ${cert.subject}`);
+            setUsbStatus(`Đã nhận diện chứng thư còn hiệu lực: ${activeCert.subject} (Hạn: ${activeCert.expDateStr || 'N/A'})`);
           } else {
             setUsbStatusType("error");
             setUsbStatus("Đã kết nối nhưng chưa phát hiện thẻ USB Token được cắm vào máy tính.");
@@ -453,6 +545,13 @@ export function ContractSignClient({
 
     if (!b2bTaxCode.trim()) {
       const msg = "Vui lòng nhập Mã số thuế doanh nghiệp (*)";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    if (b2bCertIsExpired) {
+      const msg = `Chứng thư số đã hết hạn (Hạn: ${b2bCertValidTo || "N/A"}). Vui lòng kết nối lại và chọn chứng thư số còn hiệu lực trước khi ký!`;
       setFormError(msg);
       setError(msg);
       return;
@@ -520,6 +619,7 @@ export function ContractSignClient({
           tax_code: b2bTaxCode.trim(),
           company_name: b2bCompanyName.trim() || undefined,
           cert_serial: b2bCertSerial.trim() || undefined,
+          valid_to: b2bCertValidTo.trim() || undefined,
           issuer:
             b2bCertIssuer.trim() ||
             (selectedCaProvider !== "auto" && selectedCaProvider !== "other"
@@ -561,8 +661,8 @@ export function ContractSignClient({
 
   // Nạp mẫu chữ ký test Profile
   const handleFillDevMock = () => {
-    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "0102030405";
-    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH Minh Phong Dev Test";
+    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "";
+    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH MTV đầu tư Minh Phong";
     const providerName = selectedCaProvider !== "auto" && selectedCaProvider !== "other" ? selectedCaProvider : "Viettel-CA";
     const mockPkcs7 = `MOCK_PKCS7_${providerName.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
     setB2bTaxCode(mockTaxCode);
@@ -581,8 +681,8 @@ export function ContractSignClient({
   // Giả lập Ký số B2B (Doanh nghiệp USB Token)
   const handleDevMockSignB2b = async (autoSubmit = true) => {
     setError(null);
-    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "0102030405";
-    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH Minh Phong Dev Test";
+    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "";
+    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH MTV đầu tư Minh Phong";
     const providerName = selectedCaProvider !== "auto" && selectedCaProvider !== "other" ? selectedCaProvider : "VNPT-CA / Viettel-CA";
     const mockPkcs7 = `MOCK_PKCS7_${providerName.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
 
@@ -611,6 +711,7 @@ export function ContractSignClient({
       const data = await res.json();
       if (res.ok && data.success) {
         setSignedSuccess(true);
+        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -656,6 +757,7 @@ export function ContractSignClient({
       const data = await res.json();
       if (res.ok && data.success) {
         setSignedSuccess(true);
+        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -681,6 +783,7 @@ export function ContractSignClient({
       const data = await res.json();
       if (res.ok && data.success) {
         setSignedSuccess(false);
+        setContract((prev) => (prev ? { ...prev, status: "pending_customer" } : prev));
         await refreshContractData();
       } else {
         setError(data.error || "Không thể reset hợp đồng");
@@ -693,11 +796,31 @@ export function ContractSignClient({
     }
   };
 
+  const handleOpenHistory = () => {
+    // 1. Mở Modal Lịch Sử (Audit Trail Modal) ngay lập tức để xem trọn vẹn không bị che khuất
+    setIsHistoryModalOpen(true);
+    // 2. Chuyển mobileTab sang 'history' nếu đang ở mobile
+    setMobileTab("history");
+    // 3. Cuộn mượt mà vùng sidebar trên desktop tới thẻ lịch sử
+    if (signSectionRef.current) {
+      const el = document.getElementById("contract-audit-timeline-section");
+      if (el) {
+        signSectionRef.current.scrollTo({
+          top: el.offsetTop - 12,
+          behavior: "smooth",
+        });
+      }
+    }
+  };
+
   const scrollToSigning = () => {
-    // Luôn mở Modal ký tập trung để người dùng có phản hồi trực quan ngay lập tức
+    // Trên mobile, mở modal ký hoặc chuyển thẳng sang tab Ký hợp đồng
+    setMobileTab("sign");
     setIsSignModalOpen(true);
     // Đồng thời cuộn vùng ký ở sidebar (cho desktop khi đóng modal)
-    signSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (signSectionRef.current) {
+      signSectionRef.current.scrollTo({ top: 0, behavior: "smooth" });
+    }
   };
 
   if (loading) {
@@ -725,83 +848,100 @@ export function ContractSignClient({
 
   const isB2B = contract?.customerSignerType === "business_token" || contract?.templateCode === "02/HĐ-CNDN";
   // Luôn dùng relative proxy URL để đảm bảo các máy trong mạng LAN hoặc remote client đều xem được PDF không phụ thuộc 127.0.0.1
-  const displayPdfUrl = `/api/portal/contracts/${initialToken}/pdf?v=${pdfVersion}`;
+  const displayPdfUrl = pdfVersion > 0
+    ? `/api/portal/contracts/${initialToken}/pdf?v=${pdfVersion}`
+    : `/api/portal/contracts/${initialToken}/pdf`;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", backgroundColor: "#f8fafc" }}>
+    <div className="contract-root">
       {/* 1. TOP HEADER BAR (Chuẩn Chuyên Nghiệp Tương Tự ERP) */}
-      <header
-        style={{
-          height: 60,
-          borderBottom: "1px solid #e2e8f0",
-          backgroundColor: "#ffffff",
-          padding: "0 20px",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexShrink: 0,
-          boxShadow: "0 1px 3px 0 rgba(0, 0, 0, 0.05)",
-          zIndex: 30,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+      <header className="contract-header">
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
           <div
             style={{
-              padding: "7px 10px",
+              padding: "6px 8px",
               backgroundColor: "#eff6ff",
               color: "#2563eb",
-              borderRadius: 10,
+              borderRadius: 8,
               fontWeight: 700,
-              fontSize: 14,
+              fontSize: 13,
               display: "flex",
               alignItems: "center",
-              gap: 6,
+              gap: 5,
+              flexShrink: 0,
             }}
           >
-            <FileText size={18} />
-            <span className="hidden sm:inline">Cổng Ký Số HĐĐT</span>
+            <FileText size={17} />
+            <span className="hide-on-mobile">Cổng Ký Số HĐĐT</span>
           </div>
 
-          <div style={{ minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <h1 style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", margin: 0 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap" }}>
+              <h1 style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={contract?.contractNumber || "Hợp Đồng"}>
                 {contract?.contractNumber || "Hợp Đồng Cấp Nước"}
               </h1>
 
               {signedSuccess ? (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#dcfce7", color: "#15803d", padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600 }}>
-                  <ShieldCheck size={13} /> Đã Ký Thành Công
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#dcfce7", color: "#15803d", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                  <ShieldCheck size={12} /> <span className="hide-on-mobile">Đã Ký</span>
                 </span>
               ) : (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#fef3c7", color: "#b45309", padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600 }}>
-                  <PenTool size={12} /> Chờ Khách Ký
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#fef3c7", color: "#b45309", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                  <PenTool size={11} /> <span className="hide-on-mobile">Chờ Ký</span>
                 </span>
               )}
             </div>
-            <p style={{ margin: 0, fontSize: 12, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              Khách hàng: <strong style={{ color: "#334155" }}>{contract?.customer?.fullName}</strong> - SĐT: {contract?.customer?.phone}
+            <p style={{ margin: 0, fontSize: 11.5, color: "#64748b", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {contract?.customer?.fullName} • {contract?.customer?.phone}
             </p>
           </div>
         </div>
 
         {/* Cụm Action Toolbar ở Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          {/* Nút xem lịch sử giao kết */}
+          <button
+            type="button"
+            onClick={handleOpenHistory}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              backgroundColor: "#f8fafc",
+              border: "1px solid #cbd5e1",
+              color: "#334155",
+              padding: "6px 10px",
+              borderRadius: 8,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+            title="Xem toàn bộ lịch sử kiểm toán giao kết"
+          >
+            <Clock size={13} color="#2563eb" />
+            <span className="hide-on-mobile">Lịch Sử</span>
+            <span style={{ backgroundColor: "#e2e8f0", padding: "1px 5px", borderRadius: 8, fontSize: 10, fontWeight: 700 }}>
+              {auditLogs.length}
+            </span>
+          </button>
+
           {!signedSuccess ? (
             <>
               {isDev && (
                 <button
                   type="button"
+                  className="hide-on-mobile"
                   onClick={() => (isB2B ? handleDevMockSignB2b(true) : handleDevMockSignB2c(true))}
                   disabled={signing}
                   title="Giả lập ký số khách hàng trên môi trường Dev"
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 6,
+                    gap: 5,
                     backgroundColor: "#f59e0b",
                     color: "#ffffff",
-                    padding: "8px 14px",
-                    borderRadius: 10,
+                    padding: "6px 12px",
+                    borderRadius: 8,
                     fontSize: 12,
                     fontWeight: 700,
                     border: "none",
@@ -809,8 +949,8 @@ export function ContractSignClient({
                     boxShadow: "0 2px 8px rgba(245, 158, 11, 0.25)",
                   }}
                 >
-                  <Sparkles size={14} />
-                  <span>{signing ? "Đang ký..." : "⚡ Ký Giả Lập Dev"}</span>
+                  <Sparkles size={13} />
+                  <span>{signing ? "Đang ký..." : "⚡ Ký Dev"}</span>
                 </button>
               )}
               <button
@@ -819,46 +959,47 @@ export function ContractSignClient({
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
-                  gap: 8,
+                  gap: 6,
                   backgroundColor: "#2563eb",
                   color: "#ffffff",
-                  padding: "8px 18px",
-                  borderRadius: 10,
-                  fontSize: 13,
+                  padding: "7px 14px",
+                  borderRadius: 8,
+                  fontSize: 12.5,
                   fontWeight: 700,
                   border: "none",
                   cursor: "pointer",
-                  boxShadow: "0 4px 12px rgba(37, 99, 235, 0.25)",
+                  boxShadow: "0 3px 10px rgba(37, 99, 235, 0.25)",
                   transition: "all 0.15s ease",
                 }}
               >
-                <FileSignature size={16} />
-                <span>✍️ Ký Hợp Đồng Ngay</span>
+                <FileSignature size={15} />
+                <span>✍️ Ký Ngay</span>
               </button>
             </>
           ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               {isDev && (
                 <button
                   type="button"
+                  className="hide-on-mobile"
                   onClick={handleDevResetContract}
                   disabled={resetting}
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 6,
+                    gap: 5,
                     backgroundColor: "#f1f5f9",
                     color: "#475569",
-                    padding: "8px 12px",
-                    borderRadius: 10,
-                    fontSize: 12,
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    fontSize: 11.5,
                     fontWeight: 600,
                     border: "1px solid #cbd5e1",
                     cursor: resetting ? "not-allowed" : "pointer",
                   }}
                 >
-                  <RefreshCw size={13} className={resetting ? "animate-spin" : ""} />
-                  <span>{resetting ? "Đang reset..." : "🔄 Reset Dev"}</span>
+                  <RefreshCw size={12} className={resetting ? "animate-spin" : ""} />
+                  <span>{resetting ? "Reset..." : "🔄 Reset Dev"}</span>
                 </button>
               )}
               {displayPdfUrl && (
@@ -868,19 +1009,19 @@ export function ContractSignClient({
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
-                    gap: 6,
+                    gap: 5,
                     backgroundColor: "#16a34a",
                     color: "#ffffff",
-                    padding: "8px 16px",
-                    borderRadius: 10,
-                    fontSize: 13,
+                    padding: "7px 12px",
+                    borderRadius: 8,
+                    fontSize: 12,
                     fontWeight: 600,
                     textDecoration: "none",
-                    boxShadow: "0 4px 10px rgba(22, 163, 74, 0.2)",
+                    boxShadow: "0 3px 8px rgba(22, 163, 74, 0.2)",
                   }}
                 >
-                  <Download size={15} />
-                  <span>Tải Bản Đã Ký</span>
+                  <Download size={14} />
+                  <span>Tải Bản Ký</span>
                 </a>
               )}
             </div>
@@ -888,40 +1029,50 @@ export function ContractSignClient({
         </div>
       </header>
 
-      {/* 2. MAIN 2-COLUMN SPLIT VIEW (TRỰC QUAN 70% PDF + 30% SIDEBAR KÝ) */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "row", overflow: "hidden" }}>
-        
-        {/* CỘT TRÁI (65-70%): PDF VIEWER TRỰC QUAN NHƯ TRANG ADMIN */}
-        <section
-          style={{
-            flex: "1 1 65%",
-            padding: 12,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-            backgroundColor: "#0f172a",
-          }}
+      {/* 2. MOBILE SEGMENTED CONTROL TABS */}
+      <nav className="contract-mobile-tabs">
+        <button
+          type="button"
+          className={`contract-tab-btn ${mobileTab === "pdf" ? "active" : ""}`}
+          onClick={() => setMobileTab("pdf")}
         >
+          <FileText size={15} />
+          <span>Văn Bản HĐ</span>
+        </button>
+        <button
+          type="button"
+          className={`contract-tab-btn ${mobileTab === "sign" ? "active" : ""}`}
+          onClick={() => setMobileTab("sign")}
+        >
+          <PenTool size={15} />
+          <span>{signedSuccess ? "Hồ Sơ Đã Ký" : "Ký Hợp Đồng"}</span>
+        </button>
+        <button
+          type="button"
+          className={`contract-tab-btn ${mobileTab === "history" ? "active" : ""}`}
+          onClick={() => setMobileTab("history")}
+        >
+          <Clock size={15} />
+          <span>Lịch Sử ({auditLogs.length})</span>
+        </button>
+      </nav>
+
+      {/* 3. MAIN 2-COLUMN SPLIT VIEW / MOBILE SINGLE VIEW */}
+      <div className="contract-main-layout">
+        
+        {/* CỘT TRÁI (65% desktop / 100% mobile tab 'pdf'): PDF VIEWER */}
+        <section className={`contract-pdf-section ${mobileTab !== "pdf" ? "hidden-mobile" : ""}`}>
           <ContractPdfViewer
             pdfUrl={displayPdfUrl}
             title={`Hợp Đồng Số: ${contract?.contractNumber} - ${contract?.customer?.fullName}`}
+            contract={contract}
           />
         </section>
 
-        {/* CỘT PHẢI (35%): SIDEBAR THÔNG TIN & FORM KÝ SỐ */}
+        {/* CỘT PHẢI (35% desktop / 100% mobile tab 'sign' hoặc 'history') */}
         <aside
           ref={signSectionRef}
-          style={{
-            flex: "0 0 380px",
-            maxWidth: 420,
-            backgroundColor: "#ffffff",
-            borderLeft: "1px solid #e2e8f0",
-            overflowY: "auto",
-            padding: "20px 18px",
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-          }}
+          className={`contract-sidebar-section ${mobileTab === "pdf" ? "hidden-mobile" : ""}`}
         >
           {error && (
             <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 14px", color: "#b91c1c", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
@@ -931,7 +1082,7 @@ export function ContractSignClient({
           )}
 
           {/* CARD TÓM TẮT THÔNG TIN HỢP ĐỒNG */}
-          <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: 16 }}>
+          <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 14, padding: 16 }}>
             <h3 style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", textTransform: "uppercase", letterSpacing: "0.05em", margin: "0 0 12px", display: "flex", alignItems: "center", gap: 6 }}>
               <User size={15} color="#2563eb" />
               Thông Tin Khách Hàng (Bên B)
@@ -962,24 +1113,49 @@ export function ContractSignClient({
               </div>
             </div>
 
-            <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e2e8f0", display: "flex", alignItems: "center", gap: 6, color: "#16a34a", fontSize: 12, fontWeight: 600 }}>
-              <ShieldCheck size={16} />
-              <span>Bên A (Minh Phong) đã ký số Viettel-CA</span>
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e2e8f0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#16a34a", fontWeight: 600 }}>
+                <ShieldCheck size={16} />
+                <span>Bên A (Minh Phong) đã ký số Viettel-CA</span>
+              </div>
+              <button
+                type="button"
+                onClick={handleOpenHistory}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  color: "#2563eb",
+                  background: "#eff6ff",
+                  border: "1px solid #bfdbfe",
+                  padding: "3px 8px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+                title="Bấm để xem chi tiết lịch sử giao kết"
+              >
+                <Clock size={12} />
+                <span>Lịch sử ({auditLogs.length})</span>
+              </button>
             </div>
           </div>
 
           {/* CARD THỰC HIỆN KÝ SỐ */}
           {signedSuccess ? (
-            <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 16, padding: "24px 18px", textAlign: "center" }}>
-              <CheckCircle2 size={48} color="#16a34a" style={{ margin: "0 auto 12px" }} />
-              <h3 style={{ fontSize: 17, color: "#166534", fontWeight: 700, margin: "0 0 6px" }}>
-                Hợp Đồng Đã Ký Thành Công!
-              </h3>
-              <p style={{ color: "#475569", fontSize: 13, marginBottom: 18 }}>
-                Hợp đồng điện tử số <strong>{contract?.contractNumber}</strong> đã hoàn tất giao kết hợp pháp với đầy đủ 2 mộc chữ ký số.
+            <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 14, padding: "16px 14px", textAlign: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
+                <CheckCircle2 size={24} color="#16a34a" />
+                <h3 style={{ fontSize: 15, color: "#166534", fontWeight: 700, margin: 0 }}>
+                  Hợp Đồng Đã Ký Thành Công!
+                </h3>
+              </div>
+              <p style={{ color: "#475569", fontSize: 12, margin: "0 0 12px" }}>
+                Số <strong>{contract?.contractNumber}</strong> đã hoàn tất giao kết với 2 mộc chữ ký số hợp pháp.
               </p>
               {displayPdfUrl && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
                   <a
                     href={displayPdfUrl}
                     target="_blank"
@@ -988,18 +1164,18 @@ export function ContractSignClient({
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      gap: 6,
+                      gap: 4,
                       background: "#2563eb",
                       color: "#ffffff",
-                      padding: "10px 16px",
+                      padding: "8px 10px",
                       borderRadius: 8,
                       fontWeight: 600,
-                      fontSize: 13,
+                      fontSize: 12,
                       textDecoration: "none",
                     }}
                   >
-                    <FileText size={16} />
-                    Mở Toàn Văn Bản Đã Ký
+                    <FileText size={14} />
+                    Mở Văn Bản
                   </a>
                   <a
                     href={displayPdfUrl}
@@ -1008,55 +1184,75 @@ export function ContractSignClient({
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      gap: 6,
+                      gap: 4,
                       background: "#ffffff",
                       color: "#334155",
-                      padding: "10px 16px",
+                      padding: "8px 10px",
                       borderRadius: 8,
                       fontWeight: 600,
-                      fontSize: 13,
+                      fontSize: 12,
                       textDecoration: "none",
                       border: "1px solid #cbd5e1",
                     }}
                   >
-                    <Download size={16} />
-                    Tải Tệp PDF Về Máy
+                    <Download size={14} />
+                    Tải Tệp PDF
                   </a>
                 </div>
               )}
-              {isDev && (
-                <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px dashed #cbd5e1" }}>
+              {/* Phím tắt mở lịch sử và reset */}
+              <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={handleOpenHistory}
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 4,
+                    background: "#ecfdf5",
+                    color: "#047857",
+                    border: "1px solid #a7f3d0",
+                    padding: "7px 10px",
+                    borderRadius: 8,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  <Clock size={13} />
+                  <span>Xem Lịch Sử ({auditLogs.length})</span>
+                </button>
+                {isDev && (
                   <button
                     type="button"
                     onClick={handleDevResetContract}
                     disabled={resetting}
                     style={{
-                      width: "100%",
-                      background: "#f8fafc",
-                      color: "#475569",
-                      border: "1px dashed #94a3b8",
-                      padding: "9px 12px",
-                      borderRadius: 8,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: resetting ? "not-allowed" : "pointer",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      gap: 6,
+                      gap: 4,
+                      background: "#f8fafc",
+                      color: "#475569",
+                      border: "1px dashed #cbd5e1",
+                      padding: "7px 10px",
+                      borderRadius: 8,
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      cursor: resetting ? "not-allowed" : "pointer",
                     }}
+                    title="Reset về chờ ký trong môi trường dev"
                   >
-                    <RefreshCw size={14} className={resetting ? "animate-spin" : ""} />
-                    {resetting ? "Đang đặt lại..." : "🔄 Reset Về Chờ Ký (Dev Testing)"}
+                    <RefreshCw size={12} className={resetting ? "animate-spin" : ""} />
+                    <span>Reset</span>
                   </button>
-                  <span style={{ display: "block", fontSize: 10, color: "#94a3b8", marginTop: 4 }}>
-                    Cho phép kiểm thử lại quy trình ký mà không cần tạo mới hồ sơ
-                  </span>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           ) : (
-            <div style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: 16, padding: 18, boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)" }}>
+            <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: 16, padding: 18, boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)" }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
                 <PenTool size={16} color="#2563eb" />
                 Thực Hiện Ký Hợp Đồng
@@ -1177,18 +1373,20 @@ export function ContractSignClient({
                     <div style={{ display: "flex", gap: 6 }}>
                       <input
                         type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
                         placeholder="Mã OTP 6 số"
                         value={otpCode}
                         maxLength={6}
                         onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
                         style={{
                           flex: 1,
-                          padding: "8px 10px",
-                          borderRadius: 6,
+                          padding: "9px 12px",
+                          borderRadius: 8,
                           border: "1px solid #cbd5e1",
-                          fontSize: 14,
+                          fontSize: 15,
                           fontWeight: 600,
-                          letterSpacing: "0.1em",
+                          letterSpacing: "0.15em",
                         }}
                       />
                       <button
@@ -1275,7 +1473,7 @@ export function ContractSignClient({
                     </label>
                     <input
                       type="text"
-                      placeholder="Ví dụ: 0102030405"
+                      placeholder="Ví dụ: 2301081775"
                       value={b2bTaxCode}
                       onChange={(e) => {
                         setB2bTaxCode(e.target.value.trim());
@@ -1405,6 +1603,21 @@ export function ContractSignClient({
                         </button>
                       </div>
                     </div>
+                  ) : b2bCertIsExpired ? (
+                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", color: "#991b1b", fontSize: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
+                        <AlertCircle size={15} color="#dc2626" style={{ flexShrink: 0 }} />
+                        <span>Chứng thư số USB Token đã hết hạn!</span>
+                      </div>
+                      <div style={{ fontSize: 11, lineHeight: 1.5, color: "#b91c1c", paddingLeft: 21 }}>
+                        <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
+                        <div><strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
+                        <div><strong>Thời hạn:</strong> <span style={{ textDecoration: "line-through" }}>{b2bCertValidRange}</span> (ĐÃ HẾT HẠN)</div>
+                        <div style={{ marginTop: 4, fontWeight: 600 }}>
+                          ⚠️ Vui lòng cắm đúng USB Token còn hạn, nhấn &quot;Kết Nối USB Token&quot; và chọn chứng thư số mới.
+                        </div>
+                      </div>
+                    </div>
                   ) : usbStatusType === "success" ? (
                     <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 12px", color: "#166534", fontSize: 12 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
@@ -1513,6 +1726,8 @@ export function ContractSignClient({
 
           {/* CARD LỊCH SỬ GIAO KẾT (TIMELINE AUDIT TRAIL) */}
           <div
+            id="contract-audit-timeline-section"
+            className={mobileTab === "sign" ? "hide-on-tablet-down" : ""}
             style={{
               background: "#ffffff",
               border: "1px solid #e2e8f0",
@@ -1521,39 +1736,105 @@ export function ContractSignClient({
               boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
             }}
           >
-            <ContractAuditTimeline logs={auditLogs} />
+            <ContractAuditTimeline
+              logs={auditLogs}
+              onOpenDetailModal={() => setIsHistoryModalOpen(true)}
+            />
           </div>
         </aside>
       </div>
 
-      {/* 3. MODAL KÝ SỐ DÀNH CHO MOBILE HOẶC POPUP TIỆN DỤNG */}
+      {/* 4. MOBILE FLOATING ACTION BAR (STICKY DƯỚI ĐÁY KHI XEM PDF) */}
+      {mobileTab === "pdf" && (
+        <div className="contract-floating-bar">
+          {!signedSuccess ? (
+            <button
+              type="button"
+              onClick={scrollToSigning}
+              style={{
+                flex: 1,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                background: "linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)",
+                color: "#ffffff",
+                padding: "13px 20px",
+                borderRadius: 14,
+                fontSize: 14,
+                fontWeight: 700,
+                border: "none",
+                cursor: "pointer",
+                boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)",
+              }}
+            >
+              <FileSignature size={18} />
+              <span>✍️ Ký Hợp Đồng Ngay</span>
+            </button>
+          ) : (
+            <div style={{ display: "flex", width: "100%", gap: 8 }}>
+              {displayPdfUrl && (
+                <a
+                  href={displayPdfUrl}
+                  download={`HopDong_${contract?.contractNumber}.pdf`}
+                  style={{
+                    flex: 2,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    background: "#16a34a",
+                    color: "#ffffff",
+                    padding: "12px 16px",
+                    borderRadius: 12,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    textDecoration: "none",
+                    boxShadow: "0 3px 10px rgba(22, 163, 74, 0.25)",
+                  }}
+                >
+                  <Download size={16} />
+                  <span>Tải Bản Đã Ký</span>
+                </a>
+              )}
+              <button
+                type="button"
+                onClick={() => setMobileTab("history")}
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  background: "#f1f5f9",
+                  color: "#334155",
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  border: "1px solid #cbd5e1",
+                  cursor: "pointer",
+                }}
+              >
+                <Clock size={15} color="#2563eb" />
+                <span>Lịch Sử</span>
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 5. MODAL KÝ SỐ / MOBILE BOTTOM SHEET MODAL */}
       {isSignModalOpen && (
         <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            backgroundColor: "rgba(15, 23, 42, 0.65)",
-            backdropFilter: "blur(4px)",
-            zIndex: 9999,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
+          className="contract-modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsSignModalOpen(false);
           }}
         >
-          <div
-            style={{
-              backgroundColor: "#ffffff",
-              borderRadius: 20,
-              width: "100%",
-              maxWidth: 480,
-              maxHeight: "90vh",
-              overflowY: "auto",
-              padding: 24,
-              boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)",
-              position: "relative",
-            }}
-          >
+          <div className="contract-modal-sheet">
+            {/* Pull handle indicator cho mobile */}
+            <div className="sheet-pull-handle" />
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, borderBottom: "1px solid #f1f5f9", paddingBottom: 12 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ padding: 6, background: "#eff6ff", borderRadius: 8, color: "#2563eb" }}>
@@ -1684,18 +1965,20 @@ export function ContractSignClient({
                   <div style={{ display: "flex", gap: 6 }}>
                     <input
                       type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
                       placeholder="Nhập OTP 6 số"
                       value={otpCode}
                       maxLength={6}
                       onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
                       style={{
                         flex: 1,
-                        padding: "8px 10px",
-                        borderRadius: 6,
+                        padding: "10px 12px",
+                        borderRadius: 8,
                         border: "1px solid #cbd5e1",
-                        fontSize: 14,
+                        fontSize: 16,
                         fontWeight: 600,
-                        letterSpacing: "0.1em",
+                        letterSpacing: "0.15em",
                       }}
                     />
                     <button
@@ -1794,7 +2077,7 @@ export function ContractSignClient({
                   </label>
                   <input
                     type="text"
-                    placeholder="Ví dụ: 0102030405"
+                    placeholder="Ví dụ: 2301081775"
                     value={b2bTaxCode}
                     onChange={(e) => {
                       setB2bTaxCode(e.target.value.trim());
@@ -1923,6 +2206,21 @@ export function ContractSignClient({
                       </button>
                     </div>
                   </div>
+                ) : b2bCertIsExpired ? (
+                  <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", color: "#991b1b", fontSize: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
+                      <AlertCircle size={15} color="#dc2626" style={{ flexShrink: 0 }} />
+                      <span>Chứng thư số USB Token đã hết hạn!</span>
+                    </div>
+                    <div style={{ fontSize: 11, lineHeight: 1.5, color: "#b91c1c", paddingLeft: 21 }}>
+                      <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
+                      <div><strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
+                      <div><strong>Thời hạn:</strong> <span style={{ textDecoration: "line-through" }}>{b2bCertValidRange}</span> (ĐÃ HẾT HẠN)</div>
+                      <div style={{ marginTop: 4, fontWeight: 600 }}>
+                        ⚠️ Vui lòng cắm đúng USB Token còn hạn, nhấn &quot;Kết Nối USB Token&quot; và chọn chứng thư số mới.
+                      </div>
+                    </div>
+                  </div>
                 ) : usbStatusType === "success" ? (
                   <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 12px", color: "#166534", fontSize: 12 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
@@ -2046,6 +2344,22 @@ export function ContractSignClient({
           </div>
         </div>
       )}
+
+      {/* 6. MODAL XEM LỊCH SỬ GIAO KẾT (AUDIT TRAIL MODAL) */}
+      <ContractAuditModal
+        isOpen={isHistoryModalOpen}
+        onClose={() => setIsHistoryModalOpen(false)}
+        contract={contract}
+        logs={auditLogs}
+        onOpenCertModal={() => setIsCertModalOpen(true)}
+      />
+
+      {/* 7. MODAL XEM CHI TIẾT CHỨNG THƯ SỐ PAdES */}
+      <CertificateDetailModal
+        isOpen={isCertModalOpen}
+        onClose={() => setIsCertModalOpen(false)}
+        contract={contract}
+      />
     </div>
   );
 }

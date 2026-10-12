@@ -40,6 +40,17 @@ export interface ContractDetails {
     routeName: string;
   };
   auditLogs?: ContractAuditLogItem[];
+  createdAt?: string;
+  companySignedAt?: string;
+  companyCertSerial?: string;
+  customerSignedAt?: string;
+  customerCertSubject?: string;
+  customerCertTaxCode?: string;
+  customerCertSerial?: string;
+  customerCertIssuer?: string;
+  customerIpAddress?: string;
+  pdfSha256?: string;
+  signingChannel?: string;
 }
 
 export interface ContractApiResponse<T> {
