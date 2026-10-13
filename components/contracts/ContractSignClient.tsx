@@ -16,6 +16,11 @@ import {
   Sparkles,
   RefreshCw,
   Clock,
+  Loader2,
+  ArrowRight,
+  ArrowLeft,
+  RotateCcw,
+  Check,
 } from "lucide-react";
 import { SignaturePad, SignaturePadRef } from "./SignaturePad";
 import { ContractPdfViewer } from "./ContractPdfViewer";
@@ -89,6 +94,26 @@ export function ContractSignClient({
   const [otpLoading, setOtpLoading] = useState(false);
   const [otpCooldown, setOtpCooldown] = useState(0);
   const [otpMessage, setOtpMessage] = useState<string | null>(null);
+
+  // B2C 2-step wizard signing flow state (Bước 1: Vẽ chữ ký -> Bước 2: Nhập OTP & Hoàn tất)
+  const [b2cStep, setB2cStep] = useState<1 | 2>(1);
+  const [savedSignatureBase64, setSavedSignatureBase64] = useState<string>("");
+  const otpInputRef = useRef<HTMLInputElement | null>(null);
+  const modalOtpInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Tự động focus vào ô OTP khi chuyển sang Bước 2
+  useEffect(() => {
+    if (b2cStep === 2) {
+      const timer = setTimeout(() => {
+        if (isSignModalOpen) {
+          modalOtpInputRef.current?.focus();
+        } else {
+          otpInputRef.current?.focus();
+        }
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [b2cStep, isSignModalOpen]);
 
   // Signing state
   const isStatusCompleted = (s?: string | null) => s === "completed" || s === "signed";
@@ -225,16 +250,63 @@ export function ContractSignClient({
     }
   };
 
-  // Submit Individual Signature
-  const handleSignIndividual = async (fromModal = false) => {
+  // B2C Bước 1 -> Bước 2: Lưu chữ ký tay & kích hoạt gửi mã OTP
+  const handleProceedToOtp = async (fromModal = false) => {
     setError(null);
     setFormError(null);
     const activeRef = fromModal ? modalSigPadRef.current : sigPadRef.current;
     const canvasEmpty = activeRef ? activeRef.isEmpty() : true;
     const signatureBase64 = activeRef ? activeRef.toDataURL() : "";
 
-    if (canvasEmpty && !otpCode.trim()) {
-      const msg = "Vui lòng vẽ chữ ký tay trên khung vẽ HOẶC nhập mã xác thực OTP";
+    if (canvasEmpty || !signatureBase64) {
+      const msg = "Vui lòng vẽ chữ ký tay của Quý khách lên khung ký trước khi tiếp tục";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    setSavedSignatureBase64(signatureBase64);
+    setB2cStep(2);
+
+    // Tự động kích hoạt gửi mã OTP nếu chưa trong thời gian đếm ngược
+    if (otpCooldown <= 0 && !otpLoading) {
+      await handleRequestOtp();
+    }
+  };
+
+  // Submit Individual Signature (Hoàn tất giao kết hợp đồng cá nhân với Chữ ký tay + OTP)
+  const handleSignIndividual = async (fromModal = false) => {
+    setError(null);
+    setFormError(null);
+
+    // Ưu tiên lấy chữ ký đã lưu ở Bước 1
+    let signatureBase64 = savedSignatureBase64;
+    if (!signatureBase64) {
+      const activeRef = fromModal ? modalSigPadRef.current : sigPadRef.current;
+      const canvasEmpty = activeRef ? activeRef.isEmpty() : true;
+      if (!canvasEmpty && activeRef) {
+        signatureBase64 = activeRef.toDataURL();
+        setSavedSignatureBase64(signatureBase64);
+      }
+    }
+
+    if (!signatureBase64) {
+      const msg = "Vui lòng vẽ chữ ký tay của Quý khách lên khung ký trước khi xác nhận";
+      setFormError(msg);
+      setError(msg);
+      setB2cStep(1);
+      return;
+    }
+
+    if (!otpCode.trim()) {
+      const msg = "Vui lòng nhập mã xác thực OTP gửi qua " + (otpChannel === "zalo" ? "Zalo" : "Email");
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    if (otpCode.trim().length < 6) {
+      const msg = "Mã xác thực OTP gồm đúng 6 chữ số";
       setFormError(msg);
       setError(msg);
       return;
@@ -247,8 +319,8 @@ export function ContractSignClient({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          signature_image_base64: canvasEmpty ? undefined : signatureBase64,
-          otp_code: otpCode.trim() || undefined,
+          signature_image_base64: signatureBase64,
+          otp_code: otpCode.trim(),
         }),
       });
 
@@ -259,7 +331,7 @@ export function ContractSignClient({
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        const msg = data.error || "Ký hợp đồng không thành công. Vui lòng thử lại.";
+        const msg = data.error || "Ký hợp đồng không thành công. Vui lòng kiểm tra lại mã OTP.";
         setFormError(msg);
         setError(msg);
       }
@@ -394,6 +466,18 @@ export function ContractSignClient({
           setB2bCertValidTo(expireDate || "");
           if (validDate || expireDate) {
             setB2bCertValidRange(`${validDate || ""} - ${expireDate || ""}`);
+          }
+
+          // Kiểm tra đối soát Mã số thuế ngay khi đọc USB Token (Chống cắm nhầm Token công ty khác)
+          const expectedMst = (contract?.customer?.taxCode || "").trim().replace(/[\s\-]/g, "");
+          const tokenMst = (mstMatch && mstMatch[1] ? mstMatch[1] : "").trim().replace(/[\s\-]/g, "");
+          if (expectedMst && tokenMst && expectedMst !== tokenMst && !isDev) {
+            setUsbStatusType("error");
+            const mismatchMsg = `⚠️ USB Token vừa cắm có MST (${mstMatch![1]}) KHÔNG TRÙNG KHỚP với Mã số thuế của doanh nghiệp trên hợp đồng (${contract?.customer?.taxCode}). Vui lòng cắm đúng USB Token của doanh nghiệp để ký.`;
+            setUsbStatus(mismatchMsg);
+            setFormError(mismatchMsg);
+            setIsConnectingUsb(false);
+            return;
           }
 
           if (isExpired || isNotYetValid) {
@@ -550,6 +634,18 @@ export function ContractSignClient({
       return;
     }
 
+    const contractTaxCode = (contract?.customer?.taxCode || contract?.customerCode || "")
+      .trim()
+      .replace(/[\s\-]/g, "");
+    const inputTaxCode = b2bTaxCode.trim().replace(/[\s\-]/g, "");
+
+    if (contractTaxCode && inputTaxCode && contractTaxCode !== inputTaxCode && !isDev) {
+      const msg = `Mã số thuế trên USB Token (${b2bTaxCode}) không trùng khớp với Mã số thuế của Bên B trong hợp đồng (${contract?.customer?.taxCode || contractTaxCode}). Vui lòng cắm đúng USB Token của doanh nghiệp để ký.`;
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
     if (b2bCertIsExpired) {
       const msg = `Chứng thư số đã hết hạn (Hạn: ${b2bCertValidTo || "N/A"}). Vui lòng kết nối lại và chọn chứng thư số còn hiệu lực trước khi ký!`;
       setFormError(msg);
@@ -597,18 +693,42 @@ export function ContractSignClient({
 
         if (!sigFromToken) {
           const lastErr = await postSignPlugin(usbActiveUrl, "/getLastErr", {}, 5000);
-          const errMsg =
-            lastErr === "100102"
-              ? "Không tìm thấy thiết bị USB Token khi thực hiện ký. Vui lòng kiểm tra lại cổng cắm USB Token."
-              : `Chưa hoàn tất nhập mã PIN USB Token hoặc bạn đã hủy thao tác ký (Mã lỗi: ${lastErr || "N/A"}).`;
+          let errMsg = `Chưa hoàn tất nhập mã PIN USB Token hoặc bạn đã hủy thao tác ký (Mã lỗi: ${lastErr || "N/A"}).`;
+          if (lastErr === "100102" || lastErr === "100105") {
+            errMsg = "Không tìm thấy thiết bị USB Token khi thực hiện ký. Vui lòng kiểm tra lại cổng cắm USB Token.";
+          } else if (lastErr === "100203" || lastErr === "PIN_INCORRECT") {
+            errMsg = "Mã PIN USB Token không chính xác hoặc bạn đã hủy thao tác nhập PIN.";
+          } else if (lastErr === "100201") {
+            errMsg = "Không thể truy cập khóa bí mật trong USB Token. Vui lòng rút ra cắm lại thiết bị.";
+          } else if (lastErr === "100103" || lastErr === "100205") {
+            errMsg = "Phiên làm việc với USB Token đã hết hạn. Vui lòng bấm 'Kết Nối USB Token Chữ Ký Số' để kết nối lại.";
+          }
           setFormError(errMsg);
           setError(errMsg);
           setSigning(false);
           return;
         }
 
-        finalSignatureBase64 = sigFromToken;
-        setB2bPkcs7(sigFromToken);
+        // Chuẩn hóa chữ ký số: nếu SignPlugin trả về chuỗi Hex, chuyển sang Base64
+        let sigToSend = sigFromToken.trim();
+        if (/^[0-9A-Fa-f]+$/.test(sigToSend) && sigToSend.length >= 256 && sigToSend.length % 2 === 0) {
+          try {
+            const match = sigToSend.match(/.{1,2}/g);
+            if (match) {
+              const u8 = new Uint8Array(match.map((byte) => parseInt(byte, 16)));
+              let binary = "";
+              for (let i = 0; i < u8.length; i++) {
+                binary += String.fromCharCode(u8[i]);
+              }
+              sigToSend = btoa(binary);
+            }
+          } catch {
+            // fallback
+          }
+        }
+
+        finalSignatureBase64 = sigToSend;
+        setB2bPkcs7(sigToSend);
       }
 
       const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b`, {
@@ -728,6 +848,7 @@ export function ContractSignClient({
   // Giả lập Ký số B2C (Cá nhân OTP & Chữ ký tay)
   const handleDevMockSignB2c = async (autoSubmit = true) => {
     setError(null);
+    setFormError(null);
     setOtpCode("123456");
 
     // Tự động vẽ nét chữ ký mẫu lên Canvas
@@ -738,13 +859,20 @@ export function ContractSignClient({
       modalSigPadRef.current.drawSample();
     }
 
-    if (!autoSubmit) return;
+    const sampleSignature =
+      sigPadRef.current?.toDataURL() || modalSigPadRef.current?.toDataURL() || "";
+    if (sampleSignature) {
+      setSavedSignatureBase64(sampleSignature);
+    }
+
+    if (!autoSubmit) {
+      // Chế độ "Điền mẫu": Nạp chữ ký & chuyển sang Bước 2 để kiểm tra giao diện OTP
+      setB2cStep(2);
+      return;
+    }
 
     setSigning(true);
     try {
-      const sampleSignature =
-        sigPadRef.current?.toDataURL() || modalSigPadRef.current?.toDataURL() || "";
-
       const res = await fetch(`/api/portal/contracts/${initialToken}/sign`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -776,6 +904,7 @@ export function ContractSignClient({
   const handleDevResetContract = async () => {
     setResetting(true);
     setError(null);
+    setFormError(null);
     try {
       const res = await fetch(`/api/portal/contracts/${initialToken}/reset-dev`, {
         method: "POST",
@@ -784,6 +913,10 @@ export function ContractSignClient({
       if (res.ok && data.success) {
         setSignedSuccess(false);
         setContract((prev) => (prev ? { ...prev, status: "pending_customer" } : prev));
+        setB2cStep(1);
+        setSavedSignatureBase64("");
+        setOtpCode("");
+        setOtpMessage(null);
         await refreshContractData();
       } else {
         setError(data.error || "Không thể reset hợp đồng");
@@ -1200,8 +1333,31 @@ export function ContractSignClient({
                   </a>
                 </div>
               )}
-              {/* Phím tắt mở lịch sử và reset */}
+              {/* Phím tắt mở lịch sử và xem chứng thư số PAdES */}
               <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setIsCertModalOpen(true)}
+                  style={{
+                    flex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 4,
+                    background: "#eff6ff",
+                    color: "#1d4ed8",
+                    border: "1px solid #bfdbfe",
+                    padding: "7px 10px",
+                    borderRadius: 8,
+                    fontSize: 11.5,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                  title="Xem chứng thư số X.509 và thông tin niêm phong PAdES"
+                >
+                  <ShieldCheck size={13} color="#2563eb" />
+                  <span>Chứng Thư Số PAdES</span>
+                </button>
                 <button
                   type="button"
                   onClick={handleOpenHistory}
@@ -1222,7 +1378,7 @@ export function ContractSignClient({
                   }}
                 >
                   <Clock size={13} />
-                  <span>Xem Lịch Sử ({auditLogs.length})</span>
+                  <span>Lịch Sử ({auditLogs.length})</span>
                 </button>
                 {isDev && (
                   <button
@@ -1335,134 +1491,406 @@ export function ContractSignClient({
               )}
 
               {!isB2B ? (
-                // ==================== KHÁCH HÀNG CÁ NHÂN ====================
+                // ==================== KHÁCH HÀNG CÁ NHÂN (LUỒNG 2 BƯỚC TUẦN TỰ) ====================
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  {/* Mục OTP */}
-                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: "#334155", display: "flex", alignItems: "center", gap: 4 }}>
-                        <KeyRound size={14} color="#2563eb" /> Xác thực OTP
+                  {/* Stepper chỉ báo tiến trình trực quan */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 6px" }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        cursor: b2cStep === 2 ? "pointer" : "default",
+                      }}
+                      onClick={() => {
+                        if (b2cStep === 2) {
+                          setB2cStep(1);
+                          setFormError(null);
+                        }
+                      }}
+                      title={b2cStep === 2 ? "Bấm để quay lại Bước 1 (Vẽ lại chữ ký)" : undefined}
+                    >
+                      <span
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: b2cStep === 1 ? "#2563eb" : "#16a34a",
+                          color: "#ffffff",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        {b2cStep > 1 ? <Check size={13} /> : "1"}
                       </span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: b2cStep === 1 ? "#1e293b" : "#16a34a",
+                        }}
+                      >
+                        1. Vẽ chữ ký
+                      </span>
+                    </div>
 
-                      <div style={{ display: "flex", gap: 6, fontSize: 11 }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", color: "#475569" }}>
-                          <input
-                            type="radio"
-                            name="channel_side"
-                            value="zalo"
-                            checked={otpChannel === "zalo"}
-                            onChange={() => setOtpChannel("zalo")}
-                          />
-                          Zalo
+                    <div
+                      style={{
+                        flex: 1,
+                        height: 2,
+                        background: b2cStep === 2 ? "#16a34a" : "#e2e8f0",
+                        transition: "background 0.3s ease",
+                      }}
+                    />
+
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: b2cStep === 2 ? "#2563eb" : "#94a3b8",
+                          color: "#ffffff",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        2
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: b2cStep === 2 ? "#1e293b" : "#94a3b8",
+                        }}
+                      >
+                        2. Nhập OTP
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* BƯỚC 1: VẼ CHỮ KÝ TAY & CHỌN KÊNH OTP */}
+                  <div style={{ display: b2cStep === 1 ? "flex" : "none", flexDirection: "column", gap: 14 }}>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                        <label style={{ fontSize: 12, fontWeight: 700, color: "#334155" }}>
+                          Vẽ chữ ký tay của Quý khách: <span style={{ color: "#dc2626" }}>(Bắt buộc)</span>
                         </label>
-                        {contract?.customer?.email && (
-                          <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", color: "#475569" }}>
+                      </div>
+                      <SignaturePad ref={sigPadRef} />
+                    </div>
+
+                    {/* Khung lựa chọn kênh nhận mã OTP */}
+                    <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "10px 12px" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: "#334155", display: "flex", alignItems: "center", gap: 5 }}>
+                          <KeyRound size={14} color="#2563eb" />
+                          Nhận mã OTP qua:
+                        </span>
+                        <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: "#334155", fontWeight: otpChannel === "zalo" ? 600 : 400 }}>
                             <input
                               type="radio"
                               name="channel_side"
-                              value="email"
-                              checked={otpChannel === "email"}
-                              onChange={() => setOtpChannel("email")}
+                              value="zalo"
+                              checked={otpChannel === "zalo"}
+                              onChange={() => setOtpChannel("zalo")}
                             />
-                            Email
+                            Zalo {contract?.customer?.phone ? `(${contract.customer.phone})` : ""}
                           </label>
-                        )}
+                          {contract?.customer?.email && (
+                            <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: "#334155", fontWeight: otpChannel === "email" ? 600 : 400 }}>
+                              <input
+                                type="radio"
+                                name="channel_side"
+                                value="email"
+                                checked={otpChannel === "email"}
+                                onChange={() => setOtpChannel("email")}
+                              />
+                              Email
+                            </label>
+                          )}
+                        </div>
                       </div>
                     </div>
 
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        placeholder="Mã OTP 6 số"
-                        value={otpCode}
-                        maxLength={6}
-                        onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-                        style={{
-                          flex: 1,
-                          padding: "9px 12px",
-                          borderRadius: 8,
-                          border: "1px solid #cbd5e1",
-                          fontSize: 15,
-                          fontWeight: 600,
-                          letterSpacing: "0.15em",
-                        }}
-                      />
+                    {/* Hiển thị lỗi form nếu chưa vẽ chữ ký */}
+                    {formError && (
+                      <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                        <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                        <span>{formError}</span>
+                      </div>
+                    )}
+
+                    {/* Nút bấm chuyển sang Bước 2 & tự động gửi mã OTP */}
+                    <button
+                      type="button"
+                      onClick={() => handleProceedToOtp(false)}
+                      disabled={otpLoading}
+                      style={{
+                        background: "#2563eb",
+                        color: "#ffffff",
+                        border: "none",
+                        padding: "12px",
+                        borderRadius: 10,
+                        fontWeight: 700,
+                        fontSize: 14,
+                        cursor: "pointer",
+                        boxShadow: "0 4px 10px rgba(37,99,235,0.25)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 8,
+                      }}
+                    >
+                      {otpLoading ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          <span>Đang gửi mã OTP...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>Tiếp tục & Nhận mã OTP</span>
+                          <ArrowRight size={17} />
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* BƯỚC 2: XÁC THỰC OTP & HOÀN TẤT KÝ */}
+                  <div style={{ display: b2cStep === 2 ? "flex" : "none", flexDirection: "column", gap: 14 }}>
+                    {/* Thẻ preview chữ ký tay đã vẽ */}
+                    <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.03em", display: "flex", alignItems: "center", gap: 4 }}>
+                          <CheckCircle2 size={13} color="#16a34a" /> Chữ ký tay đã ghi nhận
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setB2cStep(1);
+                            setFormError(null);
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "#2563eb",
+                            fontSize: 11.5,
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 3,
+                            padding: 0,
+                          }}
+                          title="Quay lại Bước 1 để vẽ lại nét chữ ký"
+                        >
+                          <RotateCcw size={12} />
+                          <span>Vẽ lại chữ ký</span>
+                        </button>
+                      </div>
+                      {savedSignatureBase64 && (
+                        <div style={{ background: "#ffffff", border: "1px dashed #cbd5e1", borderRadius: 8, padding: 6, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 64 }}>
+                          <img
+                            src={savedSignatureBase64}
+                            alt="Chữ ký đã vẽ"
+                            style={{ maxHeight: 60, maxWidth: "100%", objectFit: "contain" }}
+                          />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Thẻ nhập mã xác thực OTP */}
+                    <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10, padding: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                        <KeyRound size={15} color="#2563eb" />
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1e40af" }}>
+                          Nhập mã xác thực OTP 6 số
+                        </span>
+                      </div>
+
+                      <p style={{ margin: "0 0 10px", fontSize: 12, color: "#334155", lineHeight: 1.4 }}>
+                        {otpChannel === "zalo"
+                          ? `Hệ thống đã tự động gửi mã OTP tới Zalo số ${contract?.customer?.phone || ""}.`
+                          : `Hệ thống đã tự động gửi mã OTP tới email ${contract?.customer?.email || ""}.`}
+                      </p>
+
+                      <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+                        <input
+                          ref={otpInputRef}
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          placeholder="Nhập 6 số OTP"
+                          value={otpCode}
+                          maxLength={6}
+                          onChange={(e) => {
+                            setOtpCode(e.target.value.replace(/\D/g, ""));
+                            if (formError) setFormError(null);
+                          }}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            padding: "10px 12px",
+                            borderRadius: 8,
+                            border: "1px solid #93c5fd",
+                            fontSize: 16,
+                            fontWeight: 700,
+                            letterSpacing: "0.2em",
+                            textAlign: "center",
+                            background: "#ffffff",
+                            boxSizing: "border-box",
+                          }}
+                        />
+
+                        <button
+                          type="button"
+                          onClick={handleRequestOtp}
+                          disabled={otpCooldown > 0 || otpLoading}
+                          style={{
+                            flexShrink: 0,
+                            background: otpCooldown > 0 ? "#e2e8f0" : "#2563eb",
+                            color: otpCooldown > 0 ? "#64748b" : "#ffffff",
+                            border: "none",
+                            padding: "8px 12px",
+                            borderRadius: 8,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            cursor: otpCooldown > 0 || otpLoading ? "not-allowed" : "pointer",
+                            whiteSpace: "nowrap",
+                            display: "inline-flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            gap: 4,
+                            minWidth: 80,
+                          }}
+                          title="Gửi lại mã OTP"
+                        >
+                          {otpLoading ? (
+                            <>
+                              <Loader2 size={12} className="animate-spin" />
+                              <span>Đang gửi...</span>
+                            </>
+                          ) : otpCooldown > 0 ? (
+                            <>
+                              <Clock size={12} />
+                              <span>{otpCooldown}s</span>
+                            </>
+                          ) : (
+                            "Gửi lại mã"
+                          )}
+                        </button>
+                      </div>
+
+                      {otpMessage && (
+                        <p style={{ margin: "6px 0 0", fontSize: 11, color: "#16a34a" }}>{otpMessage}</p>
+                      )}
+
+                      {/* Tùy chọn đổi kênh gửi OTP nếu có cả Zalo và Email */}
+                      {contract?.customer?.email && (
+                        <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px dashed #bfdbfe", fontSize: 11, color: "#475569", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <span>Chưa nhận được mã?</span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const nextChannel = otpChannel === "zalo" ? "email" : "zalo";
+                              setOtpChannel(nextChannel);
+                              setOtpCooldown(0);
+                            }}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              color: "#2563eb",
+                              fontWeight: 600,
+                              cursor: "pointer",
+                              padding: 0,
+                              textDecoration: "underline",
+                            }}
+                          >
+                            {otpChannel === "zalo" ? "Đổi sang nhận qua Email" : "Đổi sang nhận qua Zalo"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Hiển thị lỗi form trực tiếp */}
+                    {formError && (
+                      <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                        <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                        <span>{formError}</span>
+                      </div>
+                    )}
+
+                    {/* Hàng nút: Quay lại + Hoàn tất ký */}
+                    <div style={{ display: "flex", gap: 8 }}>
                       <button
                         type="button"
-                        onClick={handleRequestOtp}
-                        disabled={otpCooldown > 0 || otpLoading}
+                        onClick={() => {
+                          setB2cStep(1);
+                          setFormError(null);
+                        }}
+                        disabled={signing}
                         style={{
-                          background: otpCooldown > 0 ? "#e2e8f0" : "#2563eb",
-                          color: otpCooldown > 0 ? "#64748b" : "#ffffff",
-                          border: "none",
-                          padding: "8px 12px",
-                          borderRadius: 6,
-                          fontSize: 12,
+                          flex: 1,
+                          background: "#f1f5f9",
+                          border: "1px solid #cbd5e1",
+                          color: "#475569",
+                          padding: "12px",
+                          borderRadius: 10,
                           fontWeight: 600,
-                          cursor: otpCooldown > 0 ? "not-allowed" : "pointer",
-                          whiteSpace: "nowrap",
+                          fontSize: 13,
+                          cursor: signing ? "not-allowed" : "pointer",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 5,
                         }}
                       >
-                        {otpLoading ? "Đang gửi..." : otpCooldown > 0 ? `${otpCooldown}s` : "Gửi mã"}
+                        <ArrowLeft size={15} />
+                        <span>Quay lại</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleSignIndividual(false)}
+                        disabled={signing}
+                        style={{
+                          flex: 2,
+                          background: signing ? "#94a3b8" : "#16a34a",
+                          color: "#ffffff",
+                          border: "none",
+                          padding: "12px",
+                          borderRadius: 10,
+                          fontWeight: 700,
+                          fontSize: 14,
+                          cursor: signing ? "not-allowed" : "pointer",
+                          boxShadow: "0 4px 10px rgba(22,163,74,0.25)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 8,
+                        }}
+                      >
+                        {signing ? (
+                          <>
+                            <RefreshCw size={17} className="animate-spin" />
+                            <span>Đang lưu & hoàn tất ký...</span>
+                          </>
+                        ) : (
+                          <>
+                            <FileSignature size={18} />
+                            <span>Hoàn Tất Ký Hợp Đồng</span>
+                          </>
+                        )}
                       </button>
                     </div>
-
-                    {otpMessage && (
-                      <p style={{ margin: "6px 0 0", fontSize: 11, color: "#16a34a" }}>{otpMessage}</p>
-                    )}
                   </div>
-
-                  {/* Khung vẽ chữ ký tay */}
-                  <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
-                      Chữ ký tay ngón tay / chuột:
-                    </label>
-                    <SignaturePad ref={sigPadRef} />
-                  </div>
-
-                  {/* Hiển thị lỗi form trực tiếp ngay trên nút ký cá nhân */}
-                  {formError && (
-                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                      <AlertCircle size={15} style={{ flexShrink: 0 }} />
-                      <span>{formError}</span>
-                    </div>
-                  )}
-
-                  {/* Nút bấm ký xác nhận */}
-                  <button
-                    type="button"
-                    onClick={() => handleSignIndividual(false)}
-                    disabled={signing}
-                    style={{
-                      background: signing ? "#94a3b8" : "#2563eb",
-                      color: "#ffffff",
-                      border: "none",
-                      padding: "12px",
-                      borderRadius: 10,
-                      fontWeight: 700,
-                      fontSize: 14,
-                      cursor: signing ? "not-allowed" : "pointer",
-                      boxShadow: "0 4px 10px rgba(37,99,235,0.25)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 8,
-                    }}
-                  >
-                    {signing ? (
-                      <>
-                        <RefreshCw size={17} className="animate-spin" />
-                        <span>Đang lưu & hoàn tất ký...</span>
-                      </>
-                    ) : (
-                      <>
-                        <FileSignature size={18} />
-                        <span>Xác Nhận Ký Hợp Đồng</span>
-                      </>
-                    )}
-                  </button>
                 </div>
               ) : (
                 // ==================== KHÁCH HÀNG DOANH NGHIỆP B2B ====================
@@ -1929,144 +2357,421 @@ export function ContractSignClient({
             )}
 
             {!isB2B ? (
+              // ==================== KHÁCH HÀNG CÁ NHÂN (MODAL 2 BƯỚC TUẦN TỰ) ====================
               <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                {/* OTP Section */}
-                <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: "#334155" }}>
-                      Mã xác thực OTP:
+                {/* Stepper chỉ báo tiến trình */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0 4px" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      cursor: b2cStep === 2 ? "pointer" : "default",
+                    }}
+                    onClick={() => {
+                      if (b2cStep === 2) {
+                        setB2cStep(1);
+                        setFormError(null);
+                      }
+                    }}
+                    title={b2cStep === 2 ? "Bấm để quay lại Bước 1 (Vẽ lại chữ ký)" : undefined}
+                  >
+                    <span
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: "50%",
+                        background: b2cStep === 1 ? "#2563eb" : "#16a34a",
+                        color: "#ffffff",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      {b2cStep > 1 ? <Check size={13} /> : "1"}
                     </span>
-                    <div style={{ display: "flex", gap: 6, fontSize: 11 }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
-                        <input
-                          type="radio"
-                          name="modal_channel"
-                          value="zalo"
-                          checked={otpChannel === "zalo"}
-                          onChange={() => setOtpChannel("zalo")}
-                        />
-                        Zalo
-                      </label>
-                      {contract?.customer?.email && (
-                        <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer" }}>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: b2cStep === 1 ? "#1e293b" : "#16a34a",
+                      }}
+                    >
+                      1. Vẽ chữ ký
+                    </span>
+                  </div>
+
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 2,
+                      background: b2cStep === 2 ? "#16a34a" : "#e2e8f0",
+                      transition: "background 0.3s ease",
+                    }}
+                  />
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span
+                      style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: "50%",
+                        background: b2cStep === 2 ? "#2563eb" : "#94a3b8",
+                        color: "#ffffff",
+                        fontSize: 11,
+                        fontWeight: 700,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      2
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: b2cStep === 2 ? "#1e293b" : "#94a3b8",
+                      }}
+                    >
+                      2. Nhập OTP
+                    </span>
+                  </div>
+                </div>
+
+                {/* BƯỚC 1: VẼ CHỮ KÝ TAY TRÊN MODAL */}
+                <div style={{ display: b2cStep === 1 ? "flex" : "none", flexDirection: "column", gap: 14 }}>
+                  <div>
+                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
+                      Vẽ chữ ký tay của Quý khách: <span style={{ color: "#dc2626", fontWeight: 700 }}>(Bắt buộc)</span>
+                    </label>
+                    <SignaturePad ref={modalSigPadRef} />
+                  </div>
+
+                  {/* Kênh nhận mã OTP */}
+                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 6 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: "#334155", display: "flex", alignItems: "center", gap: 5 }}>
+                        <KeyRound size={14} color="#2563eb" />
+                        Nhận mã OTP qua:
+                      </span>
+                      <div style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: "#334155", fontWeight: otpChannel === "zalo" ? 600 : 400 }}>
                           <input
                             type="radio"
                             name="modal_channel"
-                            value="email"
-                            checked={otpChannel === "email"}
-                            onChange={() => setOtpChannel("email")}
+                            value="zalo"
+                            checked={otpChannel === "zalo"}
+                            onChange={() => setOtpChannel("zalo")}
                           />
-                          Email
+                          Zalo {contract?.customer?.phone ? `(${contract.customer.phone})` : ""}
                         </label>
-                      )}
+                        {contract?.customer?.email && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: "#334155", fontWeight: otpChannel === "email" ? 600 : 400 }}>
+                            <input
+                              type="radio"
+                              name="modal_channel"
+                              value="email"
+                              checked={otpChannel === "email"}
+                              onChange={() => setOtpChannel("email")}
+                            />
+                            Email
+                          </label>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      placeholder="Nhập OTP 6 số"
-                      value={otpCode}
-                      maxLength={6}
-                      onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ""))}
-                      style={{
-                        flex: 1,
-                        padding: "10px 12px",
-                        borderRadius: 8,
-                        border: "1px solid #cbd5e1",
-                        fontSize: 16,
-                        fontWeight: 600,
-                        letterSpacing: "0.15em",
-                      }}
-                    />
+                  {/* Hiển thị lỗi form trực tiếp */}
+                  {formError && (
+                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                      <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                      <span>{formError}</span>
+                    </div>
+                  )}
+
+                  {/* Hàng nút: Đóng modal + Tiếp tục */}
+                  <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                     <button
                       type="button"
-                      onClick={handleRequestOtp}
-                      disabled={otpCooldown > 0 || otpLoading}
+                      onClick={() => setIsSignModalOpen(false)}
                       style={{
-                        background: otpCooldown > 0 ? "#e2e8f0" : "#2563eb",
-                        color: otpCooldown > 0 ? "#64748b" : "#ffffff",
-                        border: "none",
-                        padding: "8px 12px",
-                        borderRadius: 6,
-                        fontSize: 12,
+                        flex: 1,
+                        background: "#f1f5f9",
+                        border: "1px solid #cbd5e1",
+                        color: "#475569",
+                        padding: "11px",
+                        borderRadius: 10,
                         fontWeight: 600,
-                        cursor: otpCooldown > 0 ? "not-allowed" : "pointer",
+                        fontSize: 13,
+                        cursor: "pointer",
                       }}
                     >
-                      {otpLoading ? "Đang gửi..." : otpCooldown > 0 ? `${otpCooldown}s` : "Gửi OTP"}
+                      Đóng
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleProceedToOtp(true)}
+                      disabled={otpLoading}
+                      style={{
+                        flex: 2,
+                        background: "#2563eb",
+                        color: "#ffffff",
+                        border: "none",
+                        padding: "11px",
+                        borderRadius: 10,
+                        fontWeight: 700,
+                        fontSize: 13.5,
+                        cursor: "pointer",
+                        boxShadow: "0 4px 10px rgba(37,99,235,0.25)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 6,
+                      }}
+                    >
+                      {otpLoading ? (
+                        <>
+                          <Loader2 size={15} className="animate-spin" />
+                          <span>Đang gửi mã OTP...</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>Tiếp tục & Nhận OTP</span>
+                          <ArrowRight size={16} />
+                        </>
+                      )}
                     </button>
                   </div>
-                  {otpMessage && (
-                    <p style={{ margin: "6px 0 0", fontSize: 11, color: "#16a34a" }}>{otpMessage}</p>
-                  )}
                 </div>
 
-                {/* Canvas Signature Pad */}
-                <div>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 6 }}>
-                    Vẽ chữ ký ngón tay của Quý khách:
-                  </label>
-                  <SignaturePad ref={modalSigPadRef} />
-                </div>
-
-                {/* Hiển thị lỗi form trực tiếp ngay trên nút ký cá nhân trong modal */}
-                {formError && (
-                  <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                    <AlertCircle size={15} style={{ flexShrink: 0 }} />
-                    <span>{formError}</span>
-                  </div>
-                )}
-
-                <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-                  <button
-                    type="button"
-                    onClick={() => setIsSignModalOpen(false)}
-                    style={{
-                      flex: 1,
-                      background: "#f1f5f9",
-                      border: "1px solid #cbd5e1",
-                      color: "#475569",
-                      padding: "10px",
-                      borderRadius: 10,
-                      fontWeight: 600,
-                      fontSize: 13,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Đóng
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleSignIndividual(true)}
-                    disabled={signing}
-                    style={{
-                      flex: 2,
-                      background: signing ? "#94a3b8" : "#2563eb",
-                      color: "#ffffff",
-                      border: "none",
-                      padding: "10px",
-                      borderRadius: 10,
-                      fontWeight: 700,
-                      fontSize: 13,
-                      cursor: signing ? "not-allowed" : "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 6,
-                    }}
-                  >
-                    {signing ? (
-                      <>
-                        <RefreshCw size={15} className="animate-spin" />
-                        <span>Đang xử lý...</span>
-                      </>
-                    ) : (
-                      "Xác Nhận Ký"
+                {/* BƯỚC 2: XÁC THỰC OTP TRÊN MODAL */}
+                <div style={{ display: b2cStep === 2 ? "flex" : "none", flexDirection: "column", gap: 14 }}>
+                  {/* Xem lại ảnh chữ ký đã vẽ */}
+                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: "0.03em", display: "flex", alignItems: "center", gap: 4 }}>
+                        <CheckCircle2 size={13} color="#16a34a" /> Chữ ký tay đã ghi nhận
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setB2cStep(1);
+                          setFormError(null);
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          color: "#2563eb",
+                          fontSize: 11.5,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 3,
+                          padding: 0,
+                        }}
+                        title="Quay lại vẽ lại chữ ký"
+                      >
+                        <RotateCcw size={12} />
+                        <span>Vẽ lại chữ ký</span>
+                      </button>
+                    </div>
+                    {savedSignatureBase64 && (
+                      <div style={{ background: "#ffffff", border: "1px dashed #cbd5e1", borderRadius: 8, padding: 6, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 60 }}>
+                        <img
+                          src={savedSignatureBase64}
+                          alt="Chữ ký đã vẽ"
+                          style={{ maxHeight: 56, maxWidth: "100%", objectFit: "contain" }}
+                        />
+                      </div>
                     )}
-                  </button>
+                  </div>
+
+                  {/* Nhập mã OTP */}
+                  <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10, padding: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                      <KeyRound size={15} color="#2563eb" />
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1e40af" }}>
+                        Nhập mã xác thực OTP 6 số
+                      </span>
+                    </div>
+
+                    <p style={{ margin: "0 0 10px", fontSize: 12, color: "#334155", lineHeight: 1.4 }}>
+                      {otpChannel === "zalo"
+                        ? `Mã OTP đã gửi đến Zalo số ${contract?.customer?.phone || ""}.`
+                        : `Mã OTP đã gửi đến email ${contract?.customer?.email || ""}.`}
+                    </p>
+
+                    <div style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
+                      <input
+                        ref={modalOtpInputRef}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        placeholder="Nhập 6 số OTP"
+                        value={otpCode}
+                        maxLength={6}
+                        onChange={(e) => {
+                          setOtpCode(e.target.value.replace(/\D/g, ""));
+                          if (formError) setFormError(null);
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          padding: "10px 10px",
+                          borderRadius: 8,
+                          border: "1px solid #93c5fd",
+                          fontSize: 16,
+                          fontWeight: 700,
+                          letterSpacing: "0.2em",
+                          textAlign: "center",
+                          background: "#ffffff",
+                          boxSizing: "border-box",
+                        }}
+                      />
+
+                      <button
+                        type="button"
+                        onClick={handleRequestOtp}
+                        disabled={otpCooldown > 0 || otpLoading}
+                        style={{
+                          flexShrink: 0,
+                          background: otpCooldown > 0 ? "#e2e8f0" : "#2563eb",
+                          color: otpCooldown > 0 ? "#64748b" : "#ffffff",
+                          border: "none",
+                          padding: "8px 12px",
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: otpCooldown > 0 || otpLoading ? "not-allowed" : "pointer",
+                          whiteSpace: "nowrap",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 4,
+                          minWidth: 80,
+                        }}
+                      >
+                        {otpLoading ? (
+                          <>
+                            <Loader2 size={12} className="animate-spin" />
+                            <span>Đang gửi...</span>
+                          </>
+                        ) : otpCooldown > 0 ? (
+                          <>
+                            <Clock size={12} />
+                            <span>{otpCooldown}s</span>
+                          </>
+                        ) : (
+                          "Gửi lại"
+                        )}
+                      </button>
+                    </div>
+
+                    {otpMessage && (
+                      <p style={{ margin: "6px 0 0", fontSize: 11, color: "#16a34a" }}>{otpMessage}</p>
+                    )}
+
+                    {contract?.customer?.email && (
+                      <div style={{ marginTop: 8, paddingTop: 6, borderTop: "1px dashed #bfdbfe", fontSize: 11, color: "#475569", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <span>Chưa nhận được mã?</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextChannel = otpChannel === "zalo" ? "email" : "zalo";
+                            setOtpChannel(nextChannel);
+                            setOtpCooldown(0);
+                          }}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "#2563eb",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            padding: 0,
+                            textDecoration: "underline",
+                          }}
+                        >
+                          {otpChannel === "zalo" ? "Đổi sang nhận qua Email" : "Đổi sang nhận qua Zalo"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Hiển thị lỗi form trực tiếp */}
+                  {formError && (
+                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
+                      <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                      <span>{formError}</span>
+                    </div>
+                  )}
+
+                  {/* Hàng nút: Quay lại + Hoàn tất ký */}
+                  <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setB2cStep(1);
+                        setFormError(null);
+                      }}
+                      disabled={signing}
+                      style={{
+                        flex: 1,
+                        background: "#f1f5f9",
+                        border: "1px solid #cbd5e1",
+                        color: "#475569",
+                        padding: "11px",
+                        borderRadius: 10,
+                        fontWeight: 600,
+                        fontSize: 13,
+                        cursor: signing ? "not-allowed" : "pointer",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 5,
+                      }}
+                    >
+                      <ArrowLeft size={15} />
+                      <span>Quay lại</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSignIndividual(true)}
+                      disabled={signing}
+                      style={{
+                        flex: 2,
+                        background: signing ? "#94a3b8" : "#16a34a",
+                        color: "#ffffff",
+                        border: "none",
+                        padding: "11px",
+                        borderRadius: 10,
+                        fontWeight: 700,
+                        fontSize: 13.5,
+                        cursor: signing ? "not-allowed" : "pointer",
+                        boxShadow: "0 4px 10px rgba(22,163,74,0.25)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 6,
+                      }}
+                    >
+                      {signing ? (
+                        <>
+                          <RefreshCw size={15} className="animate-spin" />
+                          <span>Đang hoàn tất...</span>
+                        </>
+                      ) : (
+                        <>
+                          <FileSignature size={16} />
+                          <span>Hoàn Tất Ký</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
             ) : (
