@@ -438,7 +438,7 @@ export function ContractSignClient({
   const refreshContractData = async () => {
     try {
       setPdfVersion(Date.now());
-      const res = await fetch(`/api/portal/contracts/${initialToken}?_t=${Date.now()}`, {
+      const res = await fetch(`/api/portal/contracts/${initialToken}?env=${currentEnv}&_t=${Date.now()}`, {
         cache: "no-store",
         headers: {
           "Cache-Control": "no-cache",
@@ -448,6 +448,7 @@ export function ContractSignClient({
       const data = await res.json();
       if (data.success && data.data) {
         setContract(data.data);
+        setError(null);
         if (data.data.auditLogs) {
           setAuditLogs(data.data.auditLogs);
         }
@@ -1275,6 +1276,59 @@ export function ContractSignClient({
         <div style={{ padding: 16, background: "#f8fafc", borderRadius: 12, fontSize: 13, color: "#475569", lineHeight: 1.6 }}>
           Nếu liên kết đã hết hạn hoặc có sai sót, Quý khách vui lòng liên hệ Tổng đài CSKH: <strong style={{ color: "#2563eb" }}>0359 613 267</strong> để được cấp liên kết mới.
         </div>
+
+        {allowDevTools && (
+          <div style={{ marginTop: 24, paddingTop: 16, borderTop: "1px dashed #e2e8f0" }}>
+            <div style={{ display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => setIsEnvModalOpen(true)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  backgroundColor: currentEnv === "staging" ? "#ffedd5" : "#eff6ff",
+                  color: currentEnv === "staging" ? "#c2410c" : "#2563eb",
+                  border: `1px solid ${currentEnv === "staging" ? "#fdba74" : "#bfdbfe"}`,
+                  cursor: "pointer",
+                }}
+              >
+                <Server size={14} />
+                Đổi Môi Trường (Đang là: {currentEnv})
+              </button>
+              <button
+                type="button"
+                onClick={() => refreshContractData()}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  backgroundColor: "#f8fafc",
+                  color: "#334155",
+                  border: "1px solid #cbd5e1",
+                  cursor: "pointer",
+                }}
+              >
+                <RefreshCw size={14} />
+                Thử Lại Kết Nối
+              </button>
+            </div>
+            {error && (
+              <div style={{ marginTop: 12, fontSize: 11, fontFamily: "monospace", color: "#94a3b8", wordBreak: "break-all" }}>
+                Chi tiết: {error}
+              </div>
+            )}
+          </div>
+        )}
+
         <EnvironmentSwitcherModal
           isOpen={isEnvModalOpen}
           onClose={() => setIsEnvModalOpen(false)}

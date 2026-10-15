@@ -110,7 +110,16 @@ export function getErpBaseUrl(targetEnv?: ErpEnvironment | string | null): strin
   return ERP_ENV_URLS[resolved].trim().replace(/\/+$/, "");
 }
 
-async function safeParseJson<T>(res: Response, defaultError: string): Promise<ContractApiResponse<T>> {
+const DEFAULT_SERVER_HEADERS: Record<string, string> = {
+  "Accept": "application/json",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 MinhPhongPortal/1.0",
+};
+
+async function safeParseJson<T>(
+  res: Response,
+  defaultError: string,
+  targetUrl?: string
+): Promise<ContractApiResponse<T>> {
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
     try {
@@ -119,11 +128,21 @@ async function safeParseJson<T>(res: Response, defaultError: string): Promise<Co
       console.error("[erp-api] Lỗi parse JSON:", parseErr);
     }
   }
+
+  let textSnippet = "";
+  try {
+    const rawText = await res.text();
+    textSnippet = rawText.slice(0, 200).trim();
+  } catch {}
+
+  const errDetail = `[HTTP ${res.status}] ${targetUrl || ""}: ${textSnippet || res.statusText || defaultError}`;
+  console.error(`[erp-api] safeParseJson failure:`, errDetail);
+
   return {
     success: false,
     error: res.status === 404
       ? "Hợp đồng không tồn tại hoặc liên kết đã hết hạn"
-      : defaultError,
+      : `${defaultError} (${res.status} ${res.statusText || ""})`.trim(),
   };
 }
 
@@ -138,17 +157,16 @@ export async function getContractByToken(
 ): Promise<ContractApiResponse<ContractDetails>> {
   const primaryEnv = resolveErpEnvironment(targetEnv);
   const primaryUrl = getErpBaseUrl(primaryEnv);
+  const targetReqUrl = `${primaryUrl}/api/portal/contracts/${token}`;
 
   try {
-    const res = await fetch(`${primaryUrl}/api/portal/contracts/${token}`, {
+    const res = await fetch(targetReqUrl, {
       method: "GET",
-      headers: {
-        "Accept": "application/json",
-      },
+      headers: { ...DEFAULT_SERVER_HEADERS },
       cache: "no-store",
     });
 
-    const parsed = await safeParseJson<ContractDetails>(res, "Không thể kết nối đến máy chủ ERP");
+    const parsed = await safeParseJson<ContractDetails>(res, "Không thể kết nối đến máy chủ ERP", targetReqUrl);
 
     // Nếu tìm thấy hoặc lỗi không phải 404 (ví dụ đã ký xong) -> trả về kết quả ngay
     if (parsed.success) {
@@ -160,16 +178,17 @@ export async function getContractByToken(
     // Nếu đang ở Production bị 404 -> thử Staging; nếu đang ở Staging bị 404 -> thử Production
     const fallbackEnv: ErpEnvironment = primaryEnv === "production" ? "staging" : "production";
     const fallbackUrl = getErpBaseUrl(fallbackEnv);
+    const fallbackReqUrl = `${fallbackUrl}/api/portal/contracts/${token}`;
 
     try {
-      const fallbackRes = await fetch(`${fallbackUrl}/api/portal/contracts/${token}`, {
+      const fallbackRes = await fetch(fallbackReqUrl, {
         method: "GET",
-        headers: { "Accept": "application/json" },
+        headers: { ...DEFAULT_SERVER_HEADERS },
         cache: "no-store",
       });
 
       if (fallbackRes.ok) {
-        const fallbackParsed = await safeParseJson<ContractDetails>(fallbackRes, "Lỗi máy chủ dự phòng");
+        const fallbackParsed = await safeParseJson<ContractDetails>(fallbackRes, "Lỗi máy chủ dự phòng", fallbackReqUrl);
         if (fallbackParsed.success && fallbackParsed.data) {
           console.log(`[erp-api] Smart Fallback: Hợp đồng được tìm thấy tại máy chủ ${fallbackEnv}`);
           fallbackParsed.environment = fallbackEnv;
@@ -184,7 +203,7 @@ export async function getContractByToken(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[erp-api] getContractByToken lỗi mạng:", msg);
-    return { success: false, error: "Không thể kết nối đến máy chủ ERP. Vui lòng thử lại sau." };
+    return { success: false, error: `Không thể kết nối đến máy chủ ERP (${msg})` };
   }
 }
 
@@ -203,7 +222,9 @@ export async function sendContractOtp(
   targetEnv?: string | null
 ): Promise<ContractApiResponse<null>> {
   const baseUrl = getErpBaseUrl(targetEnv);
+  const targetReqUrl = `${baseUrl}/api/portal/contracts/${token}/send-otp`;
   const headers: Record<string, string> = {
+    ...DEFAULT_SERVER_HEADERS,
     "Content-Type": "application/json",
   };
   if (clientMeta?.userAgent) {
@@ -216,7 +237,7 @@ export async function sendContractOtp(
   }
 
   try {
-    const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/send-otp`, {
+    const res = await fetch(targetReqUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -226,11 +247,11 @@ export async function sendContractOtp(
       }),
     });
 
-    return await safeParseJson<null>(res, "Không thể gửi mã OTP");
+    return await safeParseJson<null>(res, "Không thể gửi mã OTP", targetReqUrl);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[erp-api] sendContractOtp error:", msg);
-    return { success: false, error: "Lỗi kết nối máy chủ khi gửi mã OTP" };
+    return { success: false, error: `Lỗi kết nối máy chủ khi gửi mã OTP (${msg})` };
   }
 }
 
@@ -252,7 +273,9 @@ export async function signContractIndividual(
   targetEnv?: string | null
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
   const baseUrl = getErpBaseUrl(targetEnv);
+  const targetReqUrl = `${baseUrl}/api/portal/contracts/${token}/sign`;
   const headers: Record<string, string> = {
+    ...DEFAULT_SERVER_HEADERS,
     "Content-Type": "application/json",
   };
   const effectiveUA = payload.user_agent || clientMeta?.userAgent || undefined;
@@ -268,7 +291,7 @@ export async function signContractIndividual(
   }
 
   try {
-    const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/sign`, {
+    const res = await fetch(targetReqUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -278,11 +301,11 @@ export async function signContractIndividual(
       }),
     });
 
-    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Không thể hoàn tất ký hợp đồng");
+    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Không thể hoàn tất ký hợp đồng", targetReqUrl);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[erp-api] signContractIndividual error:", msg);
-    return { success: false, error: "Lỗi kết nối máy chủ khi hoàn tất ký hợp đồng" };
+    return { success: false, error: `Lỗi kết nối máy chủ khi hoàn tất ký hợp đồng (${msg})` };
   }
 }
 
@@ -305,7 +328,9 @@ export async function signContractBusiness(
   targetEnv?: string | null
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
   const baseUrl = getErpBaseUrl(targetEnv);
+  const targetReqUrl = `${baseUrl}/api/portal/contracts/${token}/sign-b2b`;
   const headers: Record<string, string> = {
+    ...DEFAULT_SERVER_HEADERS,
     "Content-Type": "application/json",
   };
   const effectiveUA = payload.user_agent || clientMeta?.userAgent || undefined;
@@ -321,7 +346,7 @@ export async function signContractBusiness(
   }
 
   try {
-    const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/sign-b2b`, {
+    const res = await fetch(targetReqUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -331,10 +356,10 @@ export async function signContractBusiness(
       }),
     });
 
-    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Ký số doanh nghiệp thất bại");
+    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Ký số doanh nghiệp thất bại", targetReqUrl);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[erp-api] signContractBusiness error:", msg);
-    return { success: false, error: "Lỗi kết nối máy chủ khi ký số doanh nghiệp" };
+    return { success: false, error: `Lỗi kết nối máy chủ khi ký số doanh nghiệp (${msg})` };
   }
 }
