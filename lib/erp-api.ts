@@ -73,6 +73,23 @@ export function getErpBaseUrl(): string {
   return "https://nuocsachdinhto.com";
 }
 
+async function safeParseJson<T>(res: Response, defaultError: string): Promise<ContractApiResponse<T>> {
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    try {
+      return await res.json();
+    } catch (parseErr) {
+      console.error("[erp-api] Lỗi parse JSON:", parseErr);
+    }
+  }
+  return {
+    success: false,
+    error: res.status === 404
+      ? "Hợp đồng không tồn tại hoặc liên kết đã hết hạn"
+      : defaultError,
+  };
+}
+
 /**
  * Fetch contract info by signing token from ERP
  */
@@ -87,11 +104,11 @@ export async function getContractByToken(token: string): Promise<ContractApiResp
       cache: "no-store",
     });
 
-    const data = await res.json();
-    return data;
+    return await safeParseJson<ContractDetails>(res, "Không thể kết nối đến máy chủ ERP");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `Không thể kết nối đến máy chủ ERP: ${msg}` };
+    console.error("[erp-api] getContractByToken lỗi mạng:", msg);
+    return { success: false, error: "Không thể kết nối đến máy chủ ERP. Vui lòng thử lại sau." };
   }
 }
 
@@ -132,11 +149,11 @@ export async function sendContractOtp(
       }),
     });
 
-    const data = await res.json();
-    return data;
+    return await safeParseJson<null>(res, "Không thể gửi mã OTP");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `Lỗi gửi OTP: ${msg}` };
+    console.error("[erp-api] sendContractOtp error:", msg);
+    return { success: false, error: "Lỗi kết nối máy chủ khi gửi mã OTP" };
   }
 }
 
@@ -183,11 +200,11 @@ export async function signContractIndividual(
       }),
     });
 
-    const data = await res.json();
-    return data;
+    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Không thể hoàn tất ký hợp đồng");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `Lỗi hoàn tất ký hợp đồng: ${msg}` };
+    console.error("[erp-api] signContractIndividual error:", msg);
+    return { success: false, error: "Lỗi kết nối máy chủ khi hoàn tất ký hợp đồng" };
   }
 }
 
@@ -235,10 +252,10 @@ export async function signContractBusiness(
       }),
     });
 
-    const data = await res.json();
-    return data;
+    return await safeParseJson<{ finalPdfUrl?: string; contractNumber?: string }>(res, "Ký số doanh nghiệp thất bại");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `Lỗi ký số doanh nghiệp: ${msg}` };
+    console.error("[erp-api] signContractBusiness error:", msg);
+    return { success: false, error: "Lỗi kết nối máy chủ khi ký số doanh nghiệp" };
   }
 }

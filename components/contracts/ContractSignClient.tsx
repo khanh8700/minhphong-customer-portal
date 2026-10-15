@@ -998,9 +998,8 @@ export function ContractSignClient({
     return (
       <div style={{ maxWidth: 600, margin: "60px auto", padding: "32px 24px", textAlign: "center", background: "#ffffff", borderRadius: 16, border: "1px solid #fee2e2", boxShadow: "0 10px 25px -5px rgba(0,0,0,0.05)" }}>
         <AlertCircle size={48} color="#ef4444" style={{ margin: "0 auto 16px" }} />
-        <h2 style={{ fontSize: 20, color: "#991b1b", marginBottom: 8 }}>Không thể truy cập hợp đồng</h2>
-        <p style={{ color: "#64748b", fontSize: 14, marginBottom: 24, lineHeight: 1.6 }}>{error}</p>
-        <div style={{ padding: 16, background: "#f8fafc", borderRadius: 12, fontSize: 13, color: "#475569" }}>
+        <h2 style={{ fontSize: 20, color: "#991b1b", marginBottom: 16 }}>Không thể truy cập hợp đồng</h2>
+        <div style={{ padding: 16, background: "#f8fafc", borderRadius: 12, fontSize: 13, color: "#475569", lineHeight: 1.6 }}>
           Nếu liên kết đã hết hạn hoặc có sai sót, Quý khách vui lòng liên hệ Tổng đài CSKH: <strong style={{ color: "#2563eb" }}>0359 613 267</strong> để được cấp liên kết mới.
         </div>
       </div>
