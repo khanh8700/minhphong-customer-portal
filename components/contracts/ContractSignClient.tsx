@@ -434,25 +434,62 @@ export function ContractSignClient({
     }
   }, [contract, b2bTaxCode, b2bCompanyName]);
 
+  const getDirectErpBaseUrl = (env: "production" | "staging" | "local") => {
+    if (env === "staging") return "https://staging.nuocsachdinhto.com";
+    if (env === "local") return "http://localhost:3000";
+    return "https://erp.nuocsachdinhto.com";
+  };
+
   // Hàm tải lại hợp đồng và timeline lịch sử
   const refreshContractData = async () => {
     try {
       setPdfVersion(Date.now());
-      const res = await fetch(`/api/portal/contracts/${initialToken}?env=${currentEnv}&_t=${Date.now()}`, {
-        cache: "no-store",
-        headers: {
-          "Cache-Control": "no-cache",
-          "Pragma": "no-cache",
-        },
-      });
-      const data = await res.json();
-      if (data.success && data.data) {
-        setContract(data.data);
-        setError(null);
-        if (data.data.auditLogs) {
-          setAuditLogs(data.data.auditLogs);
+      let loadedData: ContractDetails | null = null;
+
+      // 1. Thử qua proxy nội bộ Portal
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}?env=${currentEnv}&_t=${Date.now()}`, {
+          cache: "no-store",
+          headers: {
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+          },
+        });
+        const data = await res.json();
+        if (data.success && data.data) {
+          loadedData = data.data;
         }
-        if (isStatusCompleted(data.data.status)) {
+      } catch (proxyErr) {
+        console.warn("[portal] Proxy fetch error, attempting direct fallback...", proxyErr);
+      }
+
+      // 2. Client-side Smart Fallback: nếu proxy bị Cloudflare 403 hoặc lỗi mạng, fetch trực tiếp từ máy chủ ERP
+      if (!loadedData) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}`, {
+            cache: "no-store",
+            headers: { "Accept": "application/json" },
+          });
+          if (directRes.ok) {
+            const directData = await directRes.json();
+            if (directData.success && directData.data) {
+              console.log("[portal] Client-side direct fetch thành công từ:", directBaseUrl);
+              loadedData = directData.data;
+            }
+          }
+        } catch (directErr) {
+          console.warn("[portal] Direct fetch fallback error:", directErr);
+        }
+      }
+
+      if (loadedData) {
+        setContract(loadedData);
+        setError(null);
+        if (loadedData.auditLogs) {
+          setAuditLogs(loadedData.auditLogs);
+        }
+        if (isStatusCompleted(loadedData.status)) {
           setSignedSuccess(true);
         }
       }
@@ -495,18 +532,60 @@ export function ContractSignClient({
     setOtpMessage(null);
     setError(null);
 
-    try {
-      const res = await fetch(`/api/portal/contracts/${initialToken}/send-otp`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channel: otpChannel,
-          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        }),
-      });
-      const data = await res.json();
+    const otpPayload = {
+      channel: otpChannel,
+      user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+      target_env: currentEnv,
+    };
 
-      if (res.ok && data.success) {
+    try {
+      let data: any = null;
+      let ok = false;
+
+      // 1. Thử qua proxy nội bộ Portal
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/send-otp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(otpPayload),
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("HTTP 403"))) {
+          // Proxy bị chặn bởi Cloudflare -> Chuyển sang fallback gọi trực tiếp
+        } else {
+          data = resJson;
+          ok = res.ok;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Proxy send-otp failed, fallback to direct ERP...", proxyErr);
+      }
+
+      // 2. Client-side Direct Fallback
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/send-otp`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              channel: otpChannel,
+              user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+            }),
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Direct send-otp fallback failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setOtpCooldown(60);
         setOtpMessage(
           otpChannel === "zalo"
@@ -514,10 +593,10 @@ export function ContractSignClient({
             : `Mã OTP đã được gửi đến email ${contract?.customer?.email}. Vui lòng kiểm tra hộp thư.`
         );
       } else {
-        if (data.remainingSeconds) {
+        if (data?.remainingSeconds) {
           setOtpCooldown(data.remainingSeconds);
         }
-        setError(data.error || "Không thể gửi mã OTP");
+        setError(data?.error || "Không thể gửi mã OTP");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -599,25 +678,69 @@ export function ContractSignClient({
     setSigning(true);
 
     try {
-      const res = await fetch(`/api/portal/contracts/${initialToken}/sign`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          signature_image_base64: signatureBase64,
-          otp_code: otpCode.trim(),
-          terms_agreed: true,
-          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        }),
-      });
+      const signPayload = {
+        signature_image_base64: signatureBase64,
+        otp_code: otpCode.trim(),
+        terms_agreed: true,
+        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        target_env: currentEnv,
+      };
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = null;
+      let ok = false;
+
+      // 1. Thử qua proxy nội bộ Portal
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/sign`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(signPayload),
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("HTTP 403"))) {
+          // Cloudflare block -> fallback direct
+        } else {
+          data = resJson;
+          ok = res.ok;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Proxy sign failed, attempting direct ERP...", proxyErr);
+      }
+
+      // 2. Client-side Direct Fallback
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              signature_image_base64: signatureBase64,
+              otp_code: otpCode.trim(),
+              terms_agreed: true,
+              user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+            }),
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Direct sign fallback failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setSignedSuccess(true);
         setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        const msg = data.error || "Ký hợp đồng không thành công. Vui lòng kiểm tra lại mã OTP.";
+        const msg = data?.error || "Ký hợp đồng không thành công. Vui lòng kiểm tra lại mã OTP.";
         setFormError(msg);
         setError(msg);
       }
@@ -1340,10 +1463,12 @@ export function ContractSignClient({
   }
 
   const isB2B = contract?.customerSignerType === "business_token" || contract?.templateCode === "02/HĐ-CNDN";
-  // Luôn dùng relative proxy URL để đảm bảo các máy trong mạng LAN hoặc remote client đều xem được PDF không phụ thuộc 127.0.0.1
-  const displayPdfUrl = pdfVersion > 0
-    ? `/api/portal/contracts/${initialToken}/pdf?v=${pdfVersion}`
-    : `/api/portal/contracts/${initialToken}/pdf`;
+  // Ưu tiên signed URL trực tiếp từ Supabase Storage CDN nếu có, hoặc proxy kèm param env
+  const displayPdfUrl = contract?.pdfUrl && contract.pdfUrl.startsWith("http")
+    ? contract.pdfUrl
+    : (pdfVersion > 0
+        ? `/api/portal/contracts/${initialToken}/pdf?env=${currentEnv}&v=${pdfVersion}`
+        : `/api/portal/contracts/${initialToken}/pdf?env=${currentEnv}`);
 
   return (
     <div className="contract-root">
