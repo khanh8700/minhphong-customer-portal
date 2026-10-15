@@ -95,21 +95,41 @@ export async function getContractByToken(token: string): Promise<ContractApiResp
   }
 }
 
+export interface ClientRequestMeta {
+  userAgent?: string | null;
+  clientIp?: string | null;
+}
+
 /**
  * Request OTP via Zalo or Email from ERP
  */
 export async function sendContractOtp(
   token: string,
-  channel: "zalo" | "email"
+  channel: "zalo" | "email",
+  clientMeta?: ClientRequestMeta
 ): Promise<ContractApiResponse<null>> {
   const baseUrl = getErpBaseUrl();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (clientMeta?.userAgent) {
+    headers["User-Agent"] = clientMeta.userAgent;
+    headers["X-Client-User-Agent"] = clientMeta.userAgent;
+  }
+  if (clientMeta?.clientIp) {
+    headers["X-Forwarded-For"] = clientMeta.clientIp;
+    headers["X-Real-IP"] = clientMeta.clientIp;
+  }
+
   try {
     const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/send-otp`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ channel }),
+      headers,
+      body: JSON.stringify({
+        channel,
+        user_agent: clientMeta?.userAgent || undefined,
+        client_ip: clientMeta?.clientIp || undefined,
+      }),
     });
 
     const data = await res.json();
@@ -130,16 +150,37 @@ export async function signContractIndividual(
     otp_code?: string;
     latitude?: number;
     longitude?: number;
-  }
+    user_agent?: string;
+    client_ip?: string;
+    terms_agreed?: boolean;
+  },
+  clientMeta?: ClientRequestMeta
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
   const baseUrl = getErpBaseUrl();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const effectiveUA = payload.user_agent || clientMeta?.userAgent || undefined;
+  const effectiveIP = payload.client_ip || clientMeta?.clientIp || undefined;
+
+  if (effectiveUA) {
+    headers["User-Agent"] = effectiveUA;
+    headers["X-Client-User-Agent"] = effectiveUA;
+  }
+  if (effectiveIP) {
+    headers["X-Forwarded-For"] = effectiveIP;
+    headers["X-Real-IP"] = effectiveIP;
+  }
+
   try {
     const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/sign`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
+      headers,
+      body: JSON.stringify({
+        ...payload,
+        user_agent: effectiveUA,
+        client_ip: effectiveIP,
+      }),
     });
 
     const data = await res.json();
@@ -161,16 +202,37 @@ export async function signContractBusiness(
     company_name?: string;
     cert_serial?: string;
     issuer?: string;
-  }
+    user_agent?: string;
+    client_ip?: string;
+    terms_agreed?: boolean;
+  },
+  clientMeta?: ClientRequestMeta
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
   const baseUrl = getErpBaseUrl();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const effectiveUA = payload.user_agent || clientMeta?.userAgent || undefined;
+  const effectiveIP = payload.client_ip || clientMeta?.clientIp || undefined;
+
+  if (effectiveUA) {
+    headers["User-Agent"] = effectiveUA;
+    headers["X-Client-User-Agent"] = effectiveUA;
+  }
+  if (effectiveIP) {
+    headers["X-Forwarded-For"] = effectiveIP;
+    headers["X-Real-IP"] = effectiveIP;
+  }
+
   try {
     const res = await fetch(`${baseUrl}/api/portal/contracts/${token}/sign-b2b`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
+      headers,
+      body: JSON.stringify({
+        ...payload,
+        user_agent: effectiveUA,
+        client_ip: effectiveIP,
+      }),
     });
 
     const data = await res.json();

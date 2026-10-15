@@ -98,6 +98,8 @@ export function ContractSignClient({
   // B2C 2-step wizard signing flow state (Bước 1: Vẽ chữ ký -> Bước 2: Nhập OTP & Hoàn tất)
   const [b2cStep, setB2cStep] = useState<1 | 2>(1);
   const [savedSignatureBase64, setSavedSignatureBase64] = useState<string>("");
+  // Pháp lý: Checkbox cam kết điều khoản hợp đồng trước khi hoàn tất giao kết
+  const [consentLegal, setConsentLegal] = useState<boolean>(false);
   const otpInputRef = useRef<HTMLInputElement | null>(null);
   const modalOtpInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -225,7 +227,10 @@ export function ContractSignClient({
       const res = await fetch(`/api/portal/contracts/${initialToken}/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel: otpChannel }),
+        body: JSON.stringify({
+          channel: otpChannel,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        }),
       });
       const data = await res.json();
 
@@ -312,6 +317,13 @@ export function ContractSignClient({
       return;
     }
 
+    if (!consentLegal) {
+      const msg = "Quý khách vui lòng tích chọn đồng ý với các điều khoản hợp đồng trước khi hoàn tất ký";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
     setSigning(true);
 
     try {
@@ -321,6 +333,8 @@ export function ContractSignClient({
         body: JSON.stringify({
           signature_image_base64: signatureBase64,
           otp_code: otpCode.trim(),
+          terms_agreed: true,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
         }),
       });
 
@@ -653,6 +667,13 @@ export function ContractSignClient({
       return;
     }
 
+    if (!consentLegal) {
+      const msg = "Quý khách vui lòng tích chọn đồng ý với các điều khoản hợp đồng trước khi thực hiện ký số doanh nghiệp";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
     if (!b2bPkcs7.trim() && !usbSessionId) {
       // Trong môi trường Dev: tự động nạp chữ ký số giả lập và ký để không làm nghẽn kiểm thử
       if (isDev) {
@@ -745,6 +766,8 @@ export function ContractSignClient({
             (selectedCaProvider !== "auto" && selectedCaProvider !== "other"
               ? selectedCaProvider
               : undefined),
+          terms_agreed: true,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
         }),
       });
 
@@ -809,6 +832,7 @@ export function ContractSignClient({
     setB2bTaxCode(mockTaxCode);
     setB2bCompanyName(mockCompany);
     setB2bPkcs7(mockPkcs7);
+    setConsentLegal(true);
     setUsbStatus(`🟢 [Dev Sandbox] Đã nạp chứng thư số giả lập ${providerName} (Test Profile)`);
     setB2bSignMethod("manual");
 
@@ -825,6 +849,8 @@ export function ContractSignClient({
           company_name: mockCompany,
           cert_serial: `DEV-TOKEN-SERIAL-${Date.now().toString().slice(-6)}`,
           issuer: `${providerName} Test Profile (Dev)`,
+          terms_agreed: true,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
         }),
       });
 
@@ -850,6 +876,7 @@ export function ContractSignClient({
     setError(null);
     setFormError(null);
     setOtpCode("123456");
+    setConsentLegal(true);
 
     // Tự động vẽ nét chữ ký mẫu lên Canvas
     if (sigPadRef.current?.drawSample) {
@@ -879,6 +906,7 @@ export function ContractSignClient({
         body: JSON.stringify({
           signature_image_base64: sampleSignature || undefined,
           otp_code: "123456",
+          terms_agreed: true,
         }),
       });
 
@@ -1827,6 +1855,44 @@ export function ContractSignClient({
                       </div>
                     )}
 
+                    {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 8,
+                        cursor: "pointer",
+                        background: consentLegal ? "#f0fdf4" : "#f8fafc",
+                        border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
+                        borderRadius: 8,
+                        padding: "8px 10px",
+                        marginTop: 2,
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={consentLegal}
+                        onChange={(e) => {
+                          setConsentLegal(e.target.checked);
+                          if (e.target.checked && formError?.includes("điều khoản")) {
+                            setFormError(null);
+                          }
+                        }}
+                        style={{
+                          marginTop: 2,
+                          cursor: "pointer",
+                          accentColor: "#2563eb",
+                          width: 15,
+                          height: 15,
+                          flexShrink: 0,
+                        }}
+                      />
+                      <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
+                        Tôi xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử.
+                      </span>
+                    </label>
+
                     {/* Hàng nút: Quay lại + Hoàn tất ký */}
                     <div style={{ display: "flex", gap: 8 }}>
                       <button
@@ -2114,6 +2180,44 @@ export function ContractSignClient({
                       <span>{formError}</span>
                     </div>
                   )}
+
+                  {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      cursor: "pointer",
+                      background: consentLegal ? "#f0fdf4" : "#f8fafc",
+                      border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
+                      borderRadius: 8,
+                      padding: "8px 10px",
+                      marginTop: 2,
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={consentLegal}
+                      onChange={(e) => {
+                        setConsentLegal(e.target.checked);
+                        if (e.target.checked && formError?.includes("điều khoản")) {
+                          setFormError(null);
+                        }
+                      }}
+                      style={{
+                        marginTop: 2,
+                        cursor: "pointer",
+                        accentColor: "#2563eb",
+                        width: 15,
+                        height: 15,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
+                      Đại diện doanh nghiệp xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử bằng chữ ký số.
+                    </span>
+                  </label>
 
                   <button
                     type="button"
@@ -2709,6 +2813,44 @@ export function ContractSignClient({
                     </div>
                   )}
 
+                  {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      cursor: "pointer",
+                      background: consentLegal ? "#f0fdf4" : "#f8fafc",
+                      border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
+                      borderRadius: 8,
+                      padding: "8px 10px",
+                      marginTop: 2,
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={consentLegal}
+                      onChange={(e) => {
+                        setConsentLegal(e.target.checked);
+                        if (e.target.checked && formError?.includes("điều khoản")) {
+                          setFormError(null);
+                        }
+                      }}
+                      style={{
+                        marginTop: 2,
+                        cursor: "pointer",
+                        accentColor: "#2563eb",
+                        width: 15,
+                        height: 15,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
+                      Tôi xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử.
+                    </span>
+                  </label>
+
                   {/* Hàng nút: Quay lại + Hoàn tất ký */}
                   <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                     <button
@@ -2992,6 +3134,44 @@ export function ContractSignClient({
                     <span>{formError}</span>
                   </div>
                 )}
+
+                {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 8,
+                    cursor: "pointer",
+                    background: consentLegal ? "#f0fdf4" : "#f8fafc",
+                    border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    marginTop: 2,
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={consentLegal}
+                    onChange={(e) => {
+                      setConsentLegal(e.target.checked);
+                      if (e.target.checked && formError?.includes("điều khoản")) {
+                        setFormError(null);
+                      }
+                    }}
+                    style={{
+                      marginTop: 2,
+                      cursor: "pointer",
+                      accentColor: "#2563eb",
+                      width: 15,
+                      height: 15,
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
+                    Đại diện doanh nghiệp xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử bằng chữ ký số.
+                  </span>
+                </label>
 
                 <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
                   <button

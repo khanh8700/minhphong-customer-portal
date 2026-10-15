@@ -11,7 +11,9 @@ export async function POST(
   }
 
   const body = await request.json().catch(() => ({}));
-  const result = await signContractBusiness(token, body);
+  const userAgent = body.user_agent || request.headers.get("user-agent");
+  const clientIp = body.client_ip || request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip");
+  const result = await signContractBusiness(token, body, { userAgent, clientIp });
 
   return NextResponse.json(result, { status: result.success ? 200 : 400 });
 }
