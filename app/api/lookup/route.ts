@@ -60,11 +60,32 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { data: customer, error } = await supabase
+  let { data: customer, error } = await supabase
     .from("customers")
     .select("id, customer_code, phone_normalized_values")
     .eq("customer_code_normalized", customerCode)
     .maybeSingle();
+
+  // On-demand fallback: Nếu chưa có trong Portal DB, tự động kéo tức thì từ ERP DB
+  if (!customer) {
+    try {
+      const { syncSingleCustomerAndContract } = await import("@/lib/sync/single-sync");
+      const syncRes = await syncSingleCustomerAndContract({ customerCode });
+      if (syncRes.success) {
+        const retry = await supabase
+          .from("customers")
+          .select("id, customer_code, phone_normalized_values")
+          .eq("customer_code_normalized", customerCode)
+          .maybeSingle();
+        if (retry.data) {
+          customer = retry.data;
+          error = retry.error;
+        }
+      }
+    } catch (syncErr) {
+      console.warn("[lookup] Lỗi on-demand sync customer:", syncErr);
+    }
+  }
 
   let matched = false;
 

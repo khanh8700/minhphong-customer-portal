@@ -128,7 +128,7 @@ export async function listPayments(customerId: string, supabase = createPortalAd
 
   const { data, error } = await supabase
     .from("payments")
-    .select("id, customer_id, amount, payment_method_code, note, payment_date, status, source_created_at")
+    .select("id, customer_id, amount, payment_method_code, note, payment_date, status, created_at")
     .eq("customer_id", customerId)
     .gte("payment_date", startDate.toISOString())
     .order("payment_date", { ascending: false, nullsFirst: false })
@@ -143,7 +143,7 @@ export async function listPayments(customerId: string, supabase = createPortalAd
     note: row.note,
     payment_date: row.payment_date,
     status: row.status,
-    source_created_at: row.source_created_at
+    source_created_at: row.created_at ?? null
   }));
 }
 
@@ -222,8 +222,28 @@ export async function getContractForCustomer(customerId: string, supabase = crea
     console.warn("Lỗi đọc hợp đồng từ portal DB:", error.message);
     return null;
   }
-  if (!data) return null;
-  return data as PortalContract;
+  if (data) return data as PortalContract;
+
+  // On-demand fallback: Nếu chưa có trong Portal DB, tự động kéo tức thì từ ERP DB
+  try {
+    const { syncSingleCustomerAndContract } = await import("@/lib/sync/single-sync");
+    const syncRes = await syncSingleCustomerAndContract({ customerId });
+    if (syncRes.success) {
+      const { data: refreshed } = await supabase
+        .from("contracts")
+        .select("*")
+        .eq("customer_id", customerId)
+        .order("source_created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (refreshed) return refreshed as PortalContract;
+    }
+  } catch (syncErr) {
+    console.warn("Lỗi on-demand sync hợp đồng:", syncErr);
+  }
+
+  return null;
 }
 
 export async function getContractSignedUrl(filePath: string): Promise<string> {

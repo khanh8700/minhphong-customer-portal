@@ -60,10 +60,6 @@ export default async function ContractsPage() {
                 <strong style={{ fontSize: 15 }}>{customer?.full_name}</strong>
               </div>
               <div>
-                <span className="muted-text" style={{ fontSize: 12, display: "block" }}>Mẫu hợp đồng:</span>
-                <span>{contract.template_code === "02/HĐ-CNDN" ? "Hợp đồng Doanh nghiệp (02/HĐ-CNDN)" : "Hợp đồng Sinh hoạt (01/HĐ-CNSH)"}</span>
-              </div>
-              <div>
                 <span className="muted-text" style={{ fontSize: 12, display: "block" }}>Kênh ký kết:</span>
                 <span>{contract.signing_channel === "on_site_mobile" ? "Ký tại chỗ (Máy thợ)" : contract.signing_channel === "remote_email" ? "Ký từ xa qua Email" : contract.signing_channel === "paper" ? "Hợp đồng bản giấy" : "Ký từ xa qua Zalo"}</span>
               </div>
