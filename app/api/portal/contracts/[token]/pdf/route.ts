@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getErpBaseUrl } from "@/lib/erp-api";
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ token: string }> }
 ) {
   const { token } = await params;
@@ -10,7 +10,11 @@ export async function GET(
     return new NextResponse("Mã token không hợp lệ", { status: 400 });
   }
 
-  const erpBaseUrl = getErpBaseUrl();
+  const targetEnv =
+    request.nextUrl.searchParams.get("env") ||
+    request.cookies.get("erp_target_env")?.value;
+
+  const erpBaseUrl = getErpBaseUrl(targetEnv);
   try {
     const res = await fetch(`${erpBaseUrl}/api/portal/contracts/${token}/pdf`, {
       cache: "no-store",

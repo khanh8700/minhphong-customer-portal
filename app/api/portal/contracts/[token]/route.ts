@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ token: string }> }
 ) {
   const { token } = await params;
@@ -13,7 +13,11 @@ export async function GET(
     return NextResponse.json({ success: false, error: "Mã token không hợp lệ" }, { status: 400 });
   }
 
-  const result = await getContractByToken(token);
+  const targetEnv =
+    request.nextUrl.searchParams.get("env") ||
+    request.cookies.get("erp_target_env")?.value;
+
+  const result = await getContractByToken(token, targetEnv);
   if (result.success && result.data) {
     result.data.pdfUrl = `/api/portal/contracts/${token}/pdf`;
   }

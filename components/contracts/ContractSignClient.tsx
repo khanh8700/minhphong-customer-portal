@@ -21,18 +21,243 @@ import {
   ArrowLeft,
   RotateCcw,
   Check,
+  Server,
 } from "lucide-react";
 import { SignaturePad, SignaturePadRef } from "./SignaturePad";
 import { ContractPdfViewer } from "./ContractPdfViewer";
 import { ContractAuditTimeline } from "./ContractAuditTimeline";
 import { ContractAuditModal } from "./ContractAuditModal";
 import { CertificateDetailModal } from "./CertificateDetailModal";
-import type { ContractDetails, ContractAuditLogItem } from "@/lib/erp-api";
+import type { ContractDetails, ContractAuditLogItem, ErpEnvironment } from "@/lib/erp-api";
 
 interface ContractSignClientProps {
   initialToken: string;
   initialContract?: ContractDetails | null;
   initialError?: string | null;
+  initialTargetEnv?: "production" | "staging" | "local";
+  allowDevTools?: boolean;
+}
+
+interface EnvironmentSwitcherModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  currentEnv: "production" | "staging" | "local";
+  onSelectEnv: (env: "production" | "staging" | "local") => void;
+}
+
+function EnvironmentSwitcherModal({
+  isOpen,
+  onClose,
+  currentEnv,
+  onSelectEnv,
+}: EnvironmentSwitcherModalProps) {
+  const [selected, setSelected] = useState<"production" | "staging" | "local">(currentEnv);
+
+  useEffect(() => {
+    if (isOpen) setSelected(currentEnv);
+  }, [isOpen, currentEnv]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 99999,
+        backgroundColor: "rgba(15, 23, 42, 0.6)",
+        backdropFilter: "blur(4px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        style={{
+          width: "100%",
+          maxWidth: 440,
+          backgroundColor: "#ffffff",
+          borderRadius: 16,
+          boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)",
+          border: "1px solid #e2e8f0",
+          overflow: "hidden",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "16px 20px",
+            borderBottom: "1px solid #f1f5f9",
+            backgroundColor: "#f8fafc",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Server size={18} color="#2563eb" />
+            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "#0f172a" }}>
+              Cấu hình Môi trường ERP
+            </h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              border: "none",
+              background: "none",
+              color: "#94a3b8",
+              cursor: "pointer",
+              padding: 4,
+              borderRadius: 6,
+            }}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        <div style={{ padding: 20 }}>
+          <p style={{ margin: "0 0 16px", fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
+            Chọn máy chủ ERP để nạp dữ liệu hợp đồng và thực hiện ký số. Lựa chọn này áp dụng riêng trên trình duyệt của bạn:
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {[
+              {
+                id: "production",
+                name: "Production (Mặc định)",
+                badge: "CHÍNH THỨC",
+                badgeBg: "#dcfce7",
+                badgeColor: "#15803d",
+                url: "https://erp.nuocsachdinhto.com",
+                desc: "Hệ thống vận hành chính thức của nhà máy",
+              },
+              {
+                id: "staging",
+                name: "Staging (Kiểm thử)",
+                badge: "TESTING",
+                badgeBg: "#ffedd5",
+                badgeColor: "#c2410c",
+                url: "https://staging.nuocsachdinhto.com",
+                desc: "Môi trường nghiệm thu tính năng mới",
+              },
+              {
+                id: "local",
+                name: "Local Development",
+                badge: "LOCAL",
+                badgeBg: "#e0e7ff",
+                badgeColor: "#3730a3",
+                url: "http://localhost:3000",
+                desc: "Môi trường lập trình nội bộ",
+              },
+            ].map((item) => {
+              const isChecked = selected === item.id;
+              return (
+                <label
+                  key={item.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "12px 14px",
+                    borderRadius: 12,
+                    border: `1.5px solid ${isChecked ? "#2563eb" : "#e2e8f0"}`,
+                    backgroundColor: isChecked ? "#eff6ff" : "#ffffff",
+                    cursor: "pointer",
+                    transition: "all 0.15s ease",
+                  }}
+                >
+                  <input
+                    type="radio"
+                    name="erp_env_option"
+                    value={item.id}
+                    checked={isChecked}
+                    onChange={() => setSelected(item.id as any)}
+                    style={{ marginTop: 3, accentColor: "#2563eb" }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                      <span style={{ fontSize: 14, fontWeight: 600, color: "#0f172a" }}>
+                        {item.name}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          padding: "1px 6px",
+                          borderRadius: 4,
+                          backgroundColor: item.badgeBg,
+                          color: item.badgeColor,
+                        }}
+                      >
+                        {item.badge}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11, fontFamily: "monospace", color: "#64748b", marginBottom: 2 }}>
+                      {item.url}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#94a3b8" }}>{item.desc}</div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
+            gap: 10,
+            padding: "14px 20px",
+            borderTop: "1px solid #f1f5f9",
+            backgroundColor: "#f8fafc",
+          }}
+        >
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              padding: "8px 16px",
+              fontSize: 13,
+              fontWeight: 500,
+              color: "#64748b",
+              backgroundColor: "transparent",
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              cursor: "pointer",
+            }}
+          >
+            Hủy
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onSelectEnv(selected);
+              onClose();
+            }}
+            style={{
+              padding: "8px 18px",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#ffffff",
+              backgroundColor: "#2563eb",
+              border: "none",
+              borderRadius: 8,
+              cursor: "pointer",
+            }}
+          >
+            Áp dụng & Tải lại
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const CA_PROVIDERS = [
@@ -72,11 +297,57 @@ export function ContractSignClient({
   initialToken,
   initialContract,
   initialError,
+  initialTargetEnv = "production",
+  allowDevTools = false,
 }: ContractSignClientProps) {
   const [contract, setContract] = useState<ContractDetails | null>(initialContract || null);
   const [auditLogs, setAuditLogs] = useState<ContractAuditLogItem[]>(initialContract?.auditLogs || []);
   const [loading, setLoading] = useState(!initialContract && !initialError);
   const [error, setError] = useState<string | null>(initialError || null);
+
+  // Quản lý môi trường ERP kết nối (Production | Staging | Local)
+  const [currentEnv, setCurrentEnv] = useState<"production" | "staging" | "local">(initialTargetEnv);
+  const [isEnvModalOpen, setIsEnvModalOpen] = useState(false);
+  const [clickCount, setClickCount] = useState(0);
+  const clickTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleSecretTrigger = () => {
+    setClickCount((prev) => {
+      const next = prev + 1;
+      if (next >= 3) {
+        setIsEnvModalOpen(true);
+        return 0;
+      }
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = setTimeout(() => {
+        setClickCount(0);
+      }, 1200);
+      return next;
+    });
+  };
+
+  const handleChangeEnv = (newEnv: "production" | "staging" | "local") => {
+    document.cookie = `erp_target_env=${newEnv}; path=/; max-age=604800`;
+    setCurrentEnv(newEnv);
+    const url = new URL(window.location.href);
+    if (newEnv === "production") {
+      url.searchParams.delete("env");
+    } else {
+      url.searchParams.set("env", newEnv);
+    }
+    window.location.href = url.toString();
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "e") {
+        e.preventDefault();
+        setIsEnvModalOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Modal ký số (cho mobile hoặc khi bấm nút ký ở header)
   const [isSignModalOpen, setIsSignModalOpen] = useState(false);
@@ -997,11 +1268,19 @@ export function ContractSignClient({
   if (error && !contract) {
     return (
       <div style={{ maxWidth: 600, margin: "60px auto", padding: "32px 24px", textAlign: "center", background: "#ffffff", borderRadius: 16, border: "1px solid #fee2e2", boxShadow: "0 10px 25px -5px rgba(0,0,0,0.05)" }}>
-        <AlertCircle size={48} color="#ef4444" style={{ margin: "0 auto 16px" }} />
+        <div onClick={handleSecretTrigger} style={{ display: "inline-block", cursor: "pointer" }} title="Nhấn 3 lần để mở cấu hình kiểm thử">
+          <AlertCircle size={48} color="#ef4444" style={{ margin: "0 auto 16px" }} />
+        </div>
         <h2 style={{ fontSize: 20, color: "#991b1b", marginBottom: 16 }}>Không thể truy cập hợp đồng</h2>
         <div style={{ padding: 16, background: "#f8fafc", borderRadius: 12, fontSize: 13, color: "#475569", lineHeight: 1.6 }}>
           Nếu liên kết đã hết hạn hoặc có sai sót, Quý khách vui lòng liên hệ Tổng đài CSKH: <strong style={{ color: "#2563eb" }}>0359 613 267</strong> để được cấp liên kết mới.
         </div>
+        <EnvironmentSwitcherModal
+          isOpen={isEnvModalOpen}
+          onClose={() => setIsEnvModalOpen(false)}
+          currentEnv={currentEnv}
+          onSelectEnv={handleChangeEnv}
+        />
       </div>
     );
   }
@@ -1018,6 +1297,7 @@ export function ContractSignClient({
       <header className="contract-header">
         <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1 }}>
           <div
+            onClick={handleSecretTrigger}
             style={{
               padding: "6px 8px",
               backgroundColor: "#eff6ff",
@@ -1029,11 +1309,46 @@ export function ContractSignClient({
               alignItems: "center",
               gap: 5,
               flexShrink: 0,
+              cursor: "pointer",
+              userSelect: "none",
             }}
+            title="Nhấn 3 lần để mở cấu hình kiểm thử (Staging / Production)"
           >
             <FileText size={17} />
             <span className="hide-on-mobile">Cổng Ký Số HĐĐT</span>
           </div>
+
+          {currentEnv !== "production" && (
+            <button
+              type="button"
+              onClick={() => setIsEnvModalOpen(true)}
+              style={{
+                padding: "3px 8px",
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 700,
+                backgroundColor: currentEnv === "staging" ? "#ffedd5" : "#e0e7ff",
+                color: currentEnv === "staging" ? "#c2410c" : "#3730a3",
+                border: `1px solid ${currentEnv === "staging" ? "#fdba74" : "#a5b4fc"}`,
+                cursor: "pointer",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                textTransform: "uppercase",
+              }}
+              title="Đang ở môi trường kiểm thử. Nhấn để đổi sang Production"
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  backgroundColor: currentEnv === "staging" ? "#ea580c" : "#4f46e5",
+                }}
+              />
+              {currentEnv}
+            </button>
+          )}
 
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "nowrap" }}>
@@ -3243,6 +3558,14 @@ export function ContractSignClient({
         isOpen={isCertModalOpen}
         onClose={() => setIsCertModalOpen(false)}
         contract={contract}
+      />
+
+      {/* 8. MODAL CẤU HÌNH MÔI TRƯỜNG KIỂM THỬ (SECRET TESTER SWITCHER) */}
+      <EnvironmentSwitcherModal
+        isOpen={isEnvModalOpen}
+        onClose={() => setIsEnvModalOpen(false)}
+        currentEnv={currentEnv}
+        onSelectEnv={handleChangeEnv}
       />
     </div>
   );

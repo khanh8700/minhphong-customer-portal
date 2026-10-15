@@ -59,18 +59,55 @@ export interface ContractApiResponse<T> {
   error?: string;
   message?: string;
   remainingSeconds?: number;
+  environment?: ErpEnvironment;
 }
 
-export function getErpBaseUrl(): string {
+export type ErpEnvironment = "production" | "staging" | "local";
+
+export const ERP_ENV_URLS: Record<ErpEnvironment, string> = {
+  production: process.env.ERP_API_PROD_URL || process.env.ERP_API_BASE_URL || "https://erp.nuocsachdinhto.com",
+  staging: process.env.ERP_API_STAGING_URL || "https://staging.nuocsachdinhto.com",
+  local: process.env.ERP_API_LOCAL_URL || "http://localhost:3000",
+};
+
+export function resolveErpEnvironment(explicitEnv?: string | null): ErpEnvironment {
+  const norm = (explicitEnv || "").toLowerCase().trim();
+  if (norm === "staging" || norm === "stg" || norm === "stage") return "staging";
+  if (norm === "local" || norm === "dev" || norm === "development") return "local";
+  if (norm === "production" || norm === "prod") return "production";
+
+  // Kiểm tra cookie ở Client-side nếu có
+  if (typeof document !== "undefined") {
+    const match = document.cookie.match(/(?:^|;\s*)erp_target_env=([^;]+)/);
+    if (match?.[1]) {
+      const cookieEnv = match[1].toLowerCase().trim();
+      if (cookieEnv === "staging" || cookieEnv === "local" || cookieEnv === "production") {
+        return cookieEnv as ErpEnvironment;
+      }
+    }
+  }
+
+  // Mặc định ở môi trường development local
+  if (process.env.NODE_ENV === "development") {
+    return "local";
+  }
+
+  return "production";
+}
+
+export function getErpBaseUrl(targetEnv?: ErpEnvironment | string | null): string {
+  if (targetEnv) {
+    const resolved = resolveErpEnvironment(targetEnv);
+    return ERP_ENV_URLS[resolved].trim().replace(/\/+$/, "");
+  }
+
   const envUrl = process.env.ERP_API_BASE_URL || process.env.NEXT_PUBLIC_ERP_API_BASE_URL;
   if (envUrl) {
     return envUrl.trim().replace(/\/+$/, "");
   }
-  // Default fallback for development
-  if (process.env.NODE_ENV === "development") {
-    return "http://localhost:3000";
-  }
-  return "https://nuocsachdinhto.com";
+
+  const resolved = resolveErpEnvironment();
+  return ERP_ENV_URLS[resolved].trim().replace(/\/+$/, "");
 }
 
 async function safeParseJson<T>(res: Response, defaultError: string): Promise<ContractApiResponse<T>> {
@@ -91,12 +128,19 @@ async function safeParseJson<T>(res: Response, defaultError: string): Promise<Co
 }
 
 /**
- * Fetch contract info by signing token from ERP
+ * Fetch contract info by signing token from ERP.
+ * Có cơ chế Smart Fallback: nếu không tìm thấy ở môi trường chỉ định (404),
+ * tự động kiểm tra môi trường đối ứng (Staging <-> Production) để hỗ trợ tester.
  */
-export async function getContractByToken(token: string): Promise<ContractApiResponse<ContractDetails>> {
-  const baseUrl = getErpBaseUrl();
+export async function getContractByToken(
+  token: string,
+  targetEnv?: string | null
+): Promise<ContractApiResponse<ContractDetails>> {
+  const primaryEnv = resolveErpEnvironment(targetEnv);
+  const primaryUrl = getErpBaseUrl(primaryEnv);
+
   try {
-    const res = await fetch(`${baseUrl}/api/portal/contracts/${token}`, {
+    const res = await fetch(`${primaryUrl}/api/portal/contracts/${token}`, {
       method: "GET",
       headers: {
         "Accept": "application/json",
@@ -104,7 +148,39 @@ export async function getContractByToken(token: string): Promise<ContractApiResp
       cache: "no-store",
     });
 
-    return await safeParseJson<ContractDetails>(res, "Không thể kết nối đến máy chủ ERP");
+    const parsed = await safeParseJson<ContractDetails>(res, "Không thể kết nối đến máy chủ ERP");
+
+    // Nếu tìm thấy hoặc lỗi không phải 404 (ví dụ đã ký xong) -> trả về kết quả ngay
+    if (parsed.success) {
+      parsed.environment = primaryEnv;
+      return parsed;
+    }
+
+    // Nếu bị 404: Tự động thử môi trường còn lại (Smart Fallback)
+    // Nếu đang ở Production bị 404 -> thử Staging; nếu đang ở Staging bị 404 -> thử Production
+    const fallbackEnv: ErpEnvironment = primaryEnv === "production" ? "staging" : "production";
+    const fallbackUrl = getErpBaseUrl(fallbackEnv);
+
+    try {
+      const fallbackRes = await fetch(`${fallbackUrl}/api/portal/contracts/${token}`, {
+        method: "GET",
+        headers: { "Accept": "application/json" },
+        cache: "no-store",
+      });
+
+      if (fallbackRes.ok) {
+        const fallbackParsed = await safeParseJson<ContractDetails>(fallbackRes, "Lỗi máy chủ dự phòng");
+        if (fallbackParsed.success && fallbackParsed.data) {
+          console.log(`[erp-api] Smart Fallback: Hợp đồng được tìm thấy tại máy chủ ${fallbackEnv}`);
+          fallbackParsed.environment = fallbackEnv;
+          return fallbackParsed;
+        }
+      }
+    } catch (fbErr) {
+      // Bỏ qua lỗi fallback, trả về kết quả ban đầu
+    }
+
+    return parsed;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[erp-api] getContractByToken lỗi mạng:", msg);
@@ -123,9 +199,10 @@ export interface ClientRequestMeta {
 export async function sendContractOtp(
   token: string,
   channel: "zalo" | "email",
-  clientMeta?: ClientRequestMeta
+  clientMeta?: ClientRequestMeta,
+  targetEnv?: string | null
 ): Promise<ContractApiResponse<null>> {
-  const baseUrl = getErpBaseUrl();
+  const baseUrl = getErpBaseUrl(targetEnv);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -171,9 +248,10 @@ export async function signContractIndividual(
     client_ip?: string;
     terms_agreed?: boolean;
   },
-  clientMeta?: ClientRequestMeta
+  clientMeta?: ClientRequestMeta,
+  targetEnv?: string | null
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
-  const baseUrl = getErpBaseUrl();
+  const baseUrl = getErpBaseUrl(targetEnv);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -223,9 +301,10 @@ export async function signContractBusiness(
     client_ip?: string;
     terms_agreed?: boolean;
   },
-  clientMeta?: ClientRequestMeta
+  clientMeta?: ClientRequestMeta,
+  targetEnv?: string | null
 ): Promise<ContractApiResponse<{ finalPdfUrl?: string; contractNumber?: string }>> {
-  const baseUrl = getErpBaseUrl();
+  const baseUrl = getErpBaseUrl(targetEnv);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };

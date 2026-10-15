@@ -14,7 +14,12 @@ export async function POST(
   const channel = body.channel === "email" ? "email" : "zalo";
   const userAgent = body.user_agent || request.headers.get("user-agent");
   const clientIp = body.client_ip || request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip");
-  const result = await sendContractOtp(token, channel, { userAgent, clientIp });
+  const targetEnv =
+    body.target_env ||
+    request.nextUrl.searchParams.get("env") ||
+    request.cookies.get("erp_target_env")?.value;
+
+  const result = await sendContractOtp(token, channel, { userAgent, clientIp }, targetEnv);
 
   return NextResponse.json(result, { status: result.success ? 200 : (result.remainingSeconds ? 429 : 400) });
 }
