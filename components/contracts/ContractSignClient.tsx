@@ -1147,32 +1147,71 @@ export function ContractSignClient({
         setB2bPkcs7(sigToSend);
       }
 
-      const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          signature_base64: finalSignatureBase64,
-          tax_code: b2bTaxCode.trim(),
-          company_name: b2bCompanyName.trim() || undefined,
-          cert_serial: b2bCertSerial.trim() || undefined,
-          valid_to: b2bCertValidTo.trim() || undefined,
-          issuer:
-            b2bCertIssuer.trim() ||
-            (selectedCaProvider !== "auto" && selectedCaProvider !== "other"
-              ? selectedCaProvider
-              : undefined),
-          terms_agreed: true,
-          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        }),
-      });
+      const b2bPayload = {
+        signature_base64: finalSignatureBase64,
+        tax_code: b2bTaxCode.trim(),
+        company_name: b2bCompanyName.trim() || undefined,
+        cert_serial: b2bCertSerial.trim() || undefined,
+        valid_to: b2bCertValidTo.trim() || undefined,
+        issuer:
+          b2bCertIssuer.trim() ||
+          (selectedCaProvider !== "auto" && selectedCaProvider !== "other"
+            ? selectedCaProvider
+            : undefined),
+        terms_agreed: true,
+        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        target_env: currentEnv,
+      };
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = null;
+      let ok = false;
+
+      // 1. Thử qua proxy nội bộ Portal
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b?env=${currentEnv}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(b2bPayload),
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("403"))) {
+          // Cloudflare block -> fallback direct
+        } else {
+          data = resJson;
+          ok = res.ok;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Proxy sign-b2b failed, attempting direct ERP...", proxyErr);
+      }
+
+      // 2. Client-side Direct Fallback: nếu proxy bị Cloudflare 403 hoặc lỗi mạng, fetch trực tiếp từ máy chủ ERP
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign-b2b`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(b2bPayload),
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Direct sign-b2b fallback failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setSignedSuccess(true);
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        const msg = data.error || "Ký số doanh nghiệp thất bại. Vui lòng kiểm tra lại Mã số thuế và Token.";
+        const msg = data?.error || "Ký số doanh nghiệp thất bại. Vui lòng kiểm tra lại Mã số thuế và Token.";
         setFormError(msg);
         setError(msg);
       }
@@ -1235,28 +1274,60 @@ export function ContractSignClient({
 
     setSigning(true);
     try {
-      const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          signature_base64: mockPkcs7,
-          tax_code: mockTaxCode,
-          company_name: mockCompany,
-          cert_serial: `DEV-TOKEN-SERIAL-${Date.now().toString().slice(-6)}`,
-          issuer: `${providerName} Test Profile (Dev)`,
-          terms_agreed: true,
-          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        }),
-      });
+      const mockB2bPayload = {
+        signature_base64: mockPkcs7,
+        tax_code: mockTaxCode,
+        company_name: mockCompany,
+        cert_serial: `DEV-TOKEN-SERIAL-${Date.now().toString().slice(-6)}`,
+        issuer: `${providerName} Test Profile (Dev)`,
+        terms_agreed: true,
+        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        target_env: currentEnv,
+      };
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = null;
+      let ok = false;
+
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b?env=${currentEnv}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mockB2bPayload),
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Dev mock proxy sign-b2b failed:", proxyErr);
+      }
+
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign-b2b`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(mockB2bPayload),
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Dev mock direct sign-b2b failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setSignedSuccess(true);
         setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        setError(data.error || "Giả lập ký số doanh nghiệp thất bại.");
+        setError(data?.error || "Giả lập ký số doanh nghiệp thất bại.");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1295,24 +1366,56 @@ export function ContractSignClient({
 
     setSigning(true);
     try {
-      const res = await fetch(`/api/portal/contracts/${initialToken}/sign`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          signature_image_base64: sampleSignature || undefined,
-          otp_code: "123456",
-          terms_agreed: true,
-        }),
-      });
+      const mockB2cPayload = {
+        signature_image_base64: sampleSignature || undefined,
+        otp_code: "123456",
+        terms_agreed: true,
+        target_env: currentEnv,
+      };
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = null;
+      let ok = false;
+
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/sign?env=${currentEnv}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mockB2cPayload),
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Dev mock proxy sign failed:", proxyErr);
+      }
+
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(mockB2cPayload),
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Dev mock direct sign failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setSignedSuccess(true);
         setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        setError(data.error || "Giả lập ký hợp đồng cá nhân thất bại.");
+        setError(data?.error || "Giả lập ký hợp đồng cá nhân thất bại.");
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1329,11 +1432,39 @@ export function ContractSignClient({
     setError(null);
     setFormError(null);
     try {
-      const res = await fetch(`/api/portal/contracts/${initialToken}/reset-dev`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = null;
+      let ok = false;
+
+      try {
+        const res = await fetch(`/api/portal/contracts/${initialToken}/reset-dev?env=${currentEnv}`, {
+          method: "POST",
+        });
+        const resJson = await res.json().catch(() => null);
+        if (res.ok && resJson?.success) {
+          data = resJson;
+          ok = true;
+        }
+      } catch (proxyErr) {
+        console.warn("[portal] Reset proxy failed:", proxyErr);
+      }
+
+      if (!ok) {
+        try {
+          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
+          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/reset-dev`, {
+            method: "POST",
+          });
+          const directJson = await directRes.json().catch(() => null);
+          if (directJson) {
+            data = directJson;
+            ok = directRes.ok && directJson.success;
+          }
+        } catch (directErr) {
+          console.warn("[portal] Reset direct failed:", directErr);
+        }
+      }
+
+      if (ok && data?.success) {
         setSignedSuccess(false);
         setContract((prev) => (prev ? { ...prev, status: "pending_customer" } : prev));
         setB2cStep(1);
