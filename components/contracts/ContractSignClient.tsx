@@ -388,13 +388,23 @@ export function ContractSignClient({
     }
   }, [b2cStep, isSignModalOpen]);
 
-  // Signing state
+  // Signing state helpers (Hỗ trợ luồng HĐĐT v2: Bên B ký trước, Bên A phê duyệt ký sau)
+  const isCustomerSigned = (s?: string | null) => s === "signed_by_customer";
   const isStatusCompleted = (s?: string | null) => s === "completed" || s === "signed";
+  const hasCustomerSubmittedSignature = (s?: string | null) => isCustomerSigned(s) || isStatusCompleted(s);
+
   const [signing, setSigning] = useState(false);
   const [signedSuccess, setSignedSuccess] = useState(
-    isStatusCompleted(initialContract?.status)
+    hasCustomerSubmittedSignature(initialContract?.status)
   );
   const [pdfVersion, setPdfVersion] = useState<number>(0);
+
+  // Kiểm tra yêu cầu ký lại từ Ban Quản lý (nếu có trong lịch sử kiểm toán)
+  const resignLog = auditLogs.find((log) => log.action === "customer_resign_requested");
+  const resignReason =
+    ((resignLog?.metadata as Record<string, any>)?.reason ||
+      (resignLog?.metadata as Record<string, any>)?.rejection_reason ||
+      "") as string;
 
   // Business B2B USB token state
   const [b2bTaxCode, setB2bTaxCode] = useState(
@@ -489,7 +499,7 @@ export function ContractSignClient({
         if (loadedData.auditLogs) {
           setAuditLogs(loadedData.auditLogs);
         }
-        if (isStatusCompleted(loadedData.status)) {
+        if (hasCustomerSubmittedSignature(loadedData.status)) {
           setSignedSuccess(true);
         }
       }
@@ -505,7 +515,7 @@ export function ContractSignClient({
       if (initialContract.auditLogs) {
         setAuditLogs(initialContract.auditLogs);
       }
-      if (isStatusCompleted(initialContract.status)) {
+      if (hasCustomerSubmittedSignature(initialContract.status)) {
         setSignedSuccess(true);
       }
     }
@@ -736,7 +746,7 @@ export function ContractSignClient({
 
       if (ok && data?.success) {
         setSignedSuccess(true);
-        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
+        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -1208,6 +1218,7 @@ export function ContractSignClient({
 
       if (ok && data?.success) {
         setSignedSuccess(true);
+        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -1323,7 +1334,7 @@ export function ContractSignClient({
 
       if (ok && data?.success) {
         setSignedSuccess(true);
-        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
+        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -1339,6 +1350,7 @@ export function ContractSignClient({
 
   // Giả lập Ký số B2C (Cá nhân OTP & Chữ ký tay)
   const handleDevMockSignB2c = async (autoSubmit = true) => {
+    console.log("[portal] handleDevMockSignB2c triggered, autoSubmit:", autoSubmit);
     setError(null);
     setFormError(null);
     setOtpCode("123456");
@@ -1354,9 +1366,13 @@ export function ContractSignClient({
 
     const sampleSignature =
       sigPadRef.current?.toDataURL() || modalSigPadRef.current?.toDataURL() || "";
-    if (sampleSignature) {
-      setSavedSignatureBase64(sampleSignature);
-    }
+    
+    // Đảm bảo luôn có chuỗi base64 chữ ký hợp lệ ngay cả khi Canvas chưa render xong
+    const effectiveSignature = sampleSignature && sampleSignature.length >= 50
+      ? sampleSignature
+      : "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAAAyCAYAAACqNX6+AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAFMSURBVHhe7ds9CsIwGAbgq6iLu6uI4CY4O4kndHQTD+Dk3WkXh1Zwk466uDh0E/8kSdpA2uKfhPq+8ARCSZtXnra0h0AIIYQQQgghhBBCCCGEEEIIIYQQQgghhBBCCCGEEEII4d9aLF/z7b6/j228399eYztK3W6q5oK32mru+v1kNt9U4/F0s0gIhxBCfI8g5oK32moq4l0+Zp5v95vdvF/vF/s9r9lCCCEhTghCCCGEEEIIIYQQQgghhBBCCCGEEEIIIYQQQgghhBBCCCF+V1W16a/6vX39p6b6rC9V1c1eZ7q/3vH7qgkhhBBCCOHfmB/3x+N2M295+PfrWn0OQgghhBBCrO6qC04IIYQQQgghhBBCCCGEEEIIIYQQQgghhBBCCCGEEEIIIYQQQggRjxD/6Xp+G8kghBBCCCGEEEIIIYQQQgghhH8hIUI47wD11o/c0kH6bQAAAABJRU5ErkJggg==";
+
+    setSavedSignatureBase64(effectiveSignature);
 
     if (!autoSubmit) {
       // Chế độ "Điền mẫu": Nạp chữ ký & chuyển sang Bước 2 để kiểm tra giao diện OTP
@@ -1367,7 +1383,7 @@ export function ContractSignClient({
     setSigning(true);
     try {
       const mockB2cPayload = {
-        signature_image_base64: sampleSignature || undefined,
+        signature_image_base64: effectiveSignature,
         otp_code: "123456",
         terms_agreed: true,
         target_env: currentEnv,
@@ -1411,7 +1427,7 @@ export function ContractSignClient({
 
       if (ok && data?.success) {
         setSignedSuccess(true);
-        setContract((prev) => (prev ? { ...prev, status: "completed" } : prev));
+        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
@@ -1666,9 +1682,13 @@ export function ContractSignClient({
                 {contract?.contractNumber || "Hợp Đồng Cấp Nước"}
               </h1>
 
-              {signedSuccess ? (
+              {isStatusCompleted(contract?.status) ? (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#dcfce7", color: "#15803d", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
-                  <ShieldCheck size={12} /> <span className="hide-on-mobile">Đã Ký</span>
+                  <ShieldCheck size={12} /> <span className="hide-on-mobile">Đã Hoàn Tất</span>
+                </span>
+              ) : isCustomerSigned(contract?.status) || signedSuccess ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#eff6ff", color: "#1d4ed8", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
+                  <Clock size={12} /> <span className="hide-on-mobile">Khách Đã Ký - Chờ Duyệt</span>
                 </span>
               ) : (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 3, background: "#fef3c7", color: "#b45309", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 600, flexShrink: 0 }}>
@@ -1859,6 +1879,37 @@ export function ContractSignClient({
           ref={signSectionRef}
           className={`contract-sidebar-section ${mobileTab === "pdf" ? "hidden-mobile" : ""}`}
         >
+          {/* Cảnh báo yêu cầu ký lại nếu Ban Quản lý từ chối chữ ký cũ */}
+          {contract?.status === "pending_customer" && resignLog && (
+            <div
+              style={{
+                backgroundColor: "#fff7ed",
+                border: "1px solid #fdba74",
+                borderRadius: 14,
+                padding: "12px 14px",
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 10,
+              }}
+            >
+              <AlertCircle size={20} color="#ea580c" style={{ flexShrink: 0, marginTop: 2 }} />
+              <div>
+                <h4 style={{ margin: "0 0 3px", fontSize: 13, fontWeight: 700, color: "#9a3412" }}>
+                  Hồ Sơ Được Yêu Cầu Ký Lại
+                </h4>
+                <p style={{ margin: 0, fontSize: 12, color: "#c2410c", lineHeight: 1.45 }}>
+                  Ban Quản lý đã gửi yêu cầu ký lại đối với hợp đồng này.
+                  {resignReason ? (
+                    <>
+                      {" "}Lý do: <strong>&ldquo;{resignReason}&rdquo;</strong>.
+                    </>
+                  ) : null}{" "}
+                  Quý khách vui lòng kiểm tra lại thông tin và thực hiện ký xác nhận lại bên dưới.
+                </p>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: "10px 14px", color: "#b91c1c", fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
               <AlertCircle size={16} style={{ flexShrink: 0 }} />
@@ -1899,10 +1950,22 @@ export function ContractSignClient({
             </div>
 
             <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid #e2e8f0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#16a34a", fontWeight: 600 }}>
-                <ShieldCheck size={16} />
-                <span>Bên A (Minh Phong) đã ký số Viettel-CA</span>
-              </div>
+              {isStatusCompleted(contract?.status) || Boolean(contract?.companySignedAt) ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#16a34a", fontWeight: 600 }}>
+                  <ShieldCheck size={16} />
+                  <span>Bên A (Minh Phong) đã duyệt & ký số PAdES</span>
+                </div>
+              ) : isCustomerSigned(contract?.status) || signedSuccess ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#0284c7", fontWeight: 600 }}>
+                  <Clock size={16} />
+                  <span>Bên A đang thẩm định & duyệt ký</span>
+                </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#b45309", fontWeight: 600 }}>
+                  <PenTool size={16} />
+                  <span>Bên B (Khách hàng) ký trước</span>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={handleOpenHistory}
@@ -1929,136 +1992,247 @@ export function ContractSignClient({
 
           {/* CARD THỰC HIỆN KÝ SỐ */}
           {signedSuccess ? (
-            <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 14, padding: "16px 14px", textAlign: "center" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
-                <CheckCircle2 size={24} color="#16a34a" />
-                <h3 style={{ fontSize: 15, color: "#166534", fontWeight: 700, margin: 0 }}>
-                  Hợp Đồng Đã Ký Thành Công!
-                </h3>
-              </div>
-              <p style={{ color: "#475569", fontSize: 12, margin: "0 0 12px" }}>
-                Số <strong>{contract?.contractNumber}</strong> đã hoàn tất giao kết với 2 mộc chữ ký số hợp pháp.
-              </p>
-              {displayPdfUrl && (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                  <a
-                    href={displayPdfUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 4,
-                      background: "#2563eb",
-                      color: "#ffffff",
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      fontWeight: 600,
-                      fontSize: 12,
-                      textDecoration: "none",
-                    }}
-                  >
-                    <FileText size={14} />
-                    Mở Văn Bản
-                  </a>
-                  <a
-                    href={displayPdfUrl}
-                    download={`HopDong_${contract?.contractNumber}.pdf`}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 4,
-                      background: "#ffffff",
-                      color: "#334155",
-                      padding: "8px 10px",
-                      borderRadius: 8,
-                      fontWeight: 600,
-                      fontSize: 12,
-                      textDecoration: "none",
-                      border: "1px solid #cbd5e1",
-                    }}
-                  >
-                    <Download size={14} />
-                    Tải Tệp PDF
-                  </a>
+            isStatusCompleted(contract?.status) ? (
+              /* TRƯỜNG HỢP 1: ĐÃ HOÀN TẤT GIAO KẾT (CẢ 2 BÊN ĐÃ KÝ & ĐÓNG DẤU PAdES) */
+              <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 14, padding: "16px 14px", textAlign: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
+                  <CheckCircle2 size={24} color="#16a34a" />
+                  <h3 style={{ fontSize: 15, color: "#166534", fontWeight: 700, margin: 0 }}>
+                    Hợp Đồng Đã Hoàn Tất Giao Kết!
+                  </h3>
                 </div>
-              )}
-              {/* Phím tắt mở lịch sử và xem chứng thư số PAdES */}
-              <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
-                <button
-                  type="button"
-                  onClick={() => setIsCertModalOpen(true)}
-                  style={{
-                    flex: 1,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 4,
-                    background: "#eff6ff",
-                    color: "#1d4ed8",
-                    border: "1px solid #bfdbfe",
-                    padding: "7px 10px",
-                    borderRadius: 8,
-                    fontSize: 11.5,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                  title="Xem chứng thư số X.509 và thông tin niêm phong PAdES"
-                >
-                  <ShieldCheck size={13} color="#2563eb" />
-                  <span>Chứng Thư Số PAdES</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleOpenHistory}
-                  style={{
-                    flex: 1,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 4,
-                    background: "#ecfdf5",
-                    color: "#047857",
-                    border: "1px solid #a7f3d0",
-                    padding: "7px 10px",
-                    borderRadius: 8,
-                    fontSize: 11.5,
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  <Clock size={13} />
-                  <span>Lịch Sử ({auditLogs.length})</span>
-                </button>
-                {isDev && (
+                <p style={{ color: "#475569", fontSize: 12, margin: "0 0 12px" }}>
+                  Số <strong>{contract?.contractNumber}</strong> đã hoàn tất giao kết với đầy đủ 2 mộc chữ ký số và dấu niêm phong PAdES hợp pháp.
+                </p>
+                {displayPdfUrl && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                    <a
+                      href={displayPdfUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#2563eb",
+                        color: "#ffffff",
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        textDecoration: "none",
+                      }}
+                    >
+                      <FileText size={14} />
+                      Mở Văn Bản
+                    </a>
+                    <a
+                      href={displayPdfUrl}
+                      download={`HopDong_${contract?.contractNumber}.pdf`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#ffffff",
+                        color: "#334155",
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        textDecoration: "none",
+                        border: "1px solid #cbd5e1",
+                      }}
+                    >
+                      <Download size={14} />
+                      Tải Tệp PDF
+                    </a>
+                  </div>
+                )}
+                {/* Phím tắt mở lịch sử và xem chứng thư số PAdES */}
+                <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
                   <button
                     type="button"
-                    onClick={handleDevResetContract}
-                    disabled={resetting}
+                    onClick={() => setIsCertModalOpen(true)}
                     style={{
+                      flex: 1,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
                       gap: 4,
-                      background: "#f8fafc",
-                      color: "#475569",
-                      border: "1px dashed #cbd5e1",
+                      background: "#eff6ff",
+                      color: "#1d4ed8",
+                      border: "1px solid #bfdbfe",
                       padding: "7px 10px",
                       borderRadius: 8,
                       fontSize: 11.5,
                       fontWeight: 600,
-                      cursor: resetting ? "not-allowed" : "pointer",
+                      cursor: "pointer",
                     }}
-                    title="Reset về chờ ký trong môi trường dev"
+                    title="Xem chứng thư số X.509 và thông tin niêm phong PAdES"
                   >
-                    <RefreshCw size={12} className={resetting ? "animate-spin" : ""} />
-                    <span>Reset</span>
+                    <ShieldCheck size={13} color="#2563eb" />
+                    <span>Chứng Thư Số PAdES</span>
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={handleOpenHistory}
+                    style={{
+                      flex: 1,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 4,
+                      background: "#ecfdf5",
+                      color: "#047857",
+                      border: "1px solid #a7f3d0",
+                      padding: "7px 10px",
+                      borderRadius: 8,
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Clock size={13} />
+                    <span>Lịch Sử ({auditLogs.length})</span>
+                  </button>
+                  {isDev && (
+                    <button
+                      type="button"
+                      onClick={handleDevResetContract}
+                      disabled={resetting}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#f8fafc",
+                        color: "#475569",
+                        border: "1px dashed #cbd5e1",
+                        padding: "7px 10px",
+                        borderRadius: 8,
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        cursor: resetting ? "not-allowed" : "pointer",
+                      }}
+                      title="Reset về chờ ký trong môi trường dev"
+                    >
+                      <RefreshCw size={12} className={resetting ? "animate-spin" : ""} />
+                      <span>Reset</span>
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            ) : (
+              /* TRƯỜNG HỢP 2: KHÁCH HÀNG ĐÃ KÝ BÊN B - ĐANG CHỜ CÔNG TY PHÊ DUYỆT & KÝ SỐ BÊN A */
+              <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#f0f9ff", border: "1px solid #bae6fd", borderRadius: 14, padding: "16px 14px", textAlign: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
+                  <CheckCircle2 size={24} color="#0284c7" />
+                  <h3 style={{ fontSize: 15, color: "#0369a1", fontWeight: 700, margin: 0 }}>
+                    Quý Khách Đã Ký Hợp Đồng Thành Công!
+                  </h3>
+                </div>
+                <p style={{ color: "#475569", fontSize: 12, margin: "0 0 12px", lineHeight: 1.5 }}>
+                  Hồ sơ số <strong>{contract?.contractNumber}</strong> đã được chuyển đến Ban Giám Đốc Công ty Cấp nước Minh Phong để thẩm định và đóng dấu số niêm phong điện tử Bên A. Sau khi hoàn tất phê duyệt, hệ thống sẽ tự động gửi bản hợp đồng chính thức có đầy đủ chữ ký 2 bên qua Email và Zalo.
+                </p>
+                {displayPdfUrl && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                    <a
+                      href={displayPdfUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#0284c7",
+                        color: "#ffffff",
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        textDecoration: "none",
+                      }}
+                    >
+                      <FileText size={14} />
+                      Xem Bản Đã Ký
+                    </a>
+                    <a
+                      href={displayPdfUrl}
+                      download={`HopDong_${contract?.contractNumber}_BanTam.pdf`}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#ffffff",
+                        color: "#334155",
+                        padding: "8px 10px",
+                        borderRadius: 8,
+                        fontWeight: 600,
+                        fontSize: 12,
+                        textDecoration: "none",
+                        border: "1px solid #cbd5e1",
+                      }}
+                    >
+                      <Download size={14} />
+                      Tải Bản Ký Tạm
+                    </a>
+                  </div>
+                )}
+                <div style={{ marginTop: 10, display: "flex", gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={handleOpenHistory}
+                    style={{
+                      flex: 1,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 4,
+                      background: "#e0f2fe",
+                      color: "#0369a1",
+                      border: "1px solid #7dd3fc",
+                      padding: "7px 10px",
+                      borderRadius: 8,
+                      fontSize: 11.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Clock size={13} />
+                    <span>Lịch Sử Giao Kết ({auditLogs.length})</span>
+                  </button>
+                  {isDev && (
+                    <button
+                      type="button"
+                      onClick={handleDevResetContract}
+                      disabled={resetting}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        background: "#f8fafc",
+                        color: "#475569",
+                        border: "1px dashed #cbd5e1",
+                        padding: "7px 10px",
+                        borderRadius: 8,
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        cursor: resetting ? "not-allowed" : "pointer",
+                      }}
+                      title="Reset về chờ ký trong môi trường dev"
+                    >
+                      <RefreshCw size={12} className={resetting ? "animate-spin" : ""} />
+                      <span>Reset</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
           ) : (
             <div className={mobileTab === "history" ? "hide-on-tablet-down" : ""} style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: 16, padding: 18, boxShadow: "0 4px 6px -1px rgba(0,0,0,0.05)" }}>
               <h3 style={{ fontSize: 15, fontWeight: 700, color: "#0f172a", margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
@@ -2939,18 +3113,18 @@ export function ContractSignClient({
                     alignItems: "center",
                     justifyContent: "center",
                     gap: 6,
-                    background: "#16a34a",
+                    background: isStatusCompleted(contract?.status) ? "#16a34a" : "#0284c7",
                     color: "#ffffff",
                     padding: "12px 16px",
                     borderRadius: 12,
                     fontSize: 13,
                     fontWeight: 700,
                     textDecoration: "none",
-                    boxShadow: "0 3px 10px rgba(22, 163, 74, 0.25)",
+                    boxShadow: isStatusCompleted(contract?.status) ? "0 3px 10px rgba(22, 163, 74, 0.25)" : "0 3px 10px rgba(2, 132, 199, 0.25)",
                   }}
                 >
                   <Download size={16} />
-                  <span>Tải Bản Đã Ký</span>
+                  <span>{isStatusCompleted(contract?.status) ? "Tải Bản Đã Ký" : "Tải Bản Ký Tạm"}</span>
                 </a>
               )}
               <button

@@ -16,9 +16,11 @@ interface ContractAuditTimelineProps {
 }
 
 const ACTION_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  contract_submitted: { bg: "#f8fafc", text: "#475569", border: "#cbd5e1" },
   company_signed: { bg: "#ecfdf5", text: "#059669", border: "#a7f3d0" },
   completed: { bg: "#ecfdf5", text: "#047857", border: "#6ee7b7" },
   customer_signed: { bg: "#f0f9ff", text: "#0284c7", border: "#bae6fd" },
+  customer_resign_requested: { bg: "#fff7ed", text: "#c2410c", border: "#fdba74" },
   b2b_token_signed: { bg: "#eef2ff", text: "#4f46e5", border: "#c7d2fe" },
   rejected: { bg: "#fef2f2", text: "#dc2626", border: "#fecaca" },
   viewed: { bg: "#faf5ff", text: "#7c3aed", border: "#e9d5ff" },
@@ -30,15 +32,17 @@ const ACTION_COLORS: Record<string, { bg: string; text: string; border: string }
 
 const ACTION_DEFAULT_LABELS: Record<string, string> = {
   created: "Khởi tạo hồ sơ hợp đồng",
+  contract_submitted: "Nộp hồ sơ lắp đặt & Khởi tạo hợp đồng",
   company_signed: "Công ty ký số Viettel-CA",
   notification_sent: "Đã gửi thông báo ký số tới khách hàng",
   viewed: "Khách hàng mở xem hợp đồng",
   portal_viewed: "Khách hàng truy cập cổng ký số",
   otp_requested: "Khách hàng yêu cầu mã OTP xác thực",
-  customer_signed: "Khách hàng hoàn tất ký xác nhận",
+  customer_signed: "Khách hàng hoàn tất ký xác nhận (Bên B)",
+  customer_resign_requested: "Yêu cầu khách hàng ký lại hợp đồng",
   b2b_token_signed: "Doanh nghiệp hoàn tất ký số USB Token",
   rejected: "Khách hàng từ chối ký hợp đồng",
-  completed: "Hoàn tất giao kết & Kích hoạt dịch vụ",
+  completed: "Công ty duyệt & ký số Bên A - Hoàn tất giao kết",
   email_delivered: "Đã gửi bản hợp đồng hoàn tất qua Email",
 };
 
