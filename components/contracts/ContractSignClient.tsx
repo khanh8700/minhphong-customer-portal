@@ -28,7 +28,17 @@ import { ContractPdfViewer } from "./ContractPdfViewer";
 import { ContractAuditTimeline } from "./ContractAuditTimeline";
 import { ContractAuditModal } from "./ContractAuditModal";
 import { CertificateDetailModal } from "./CertificateDetailModal";
-import type { ContractDetails, ContractAuditLogItem, ErpEnvironment } from "@/lib/erp-api";
+import { ContractB2bSignPanel } from "./ContractB2bSignPanel";
+import {
+  getDirectErpBaseUrl,
+  postContractActionWithFallback,
+  type ContractDetails,
+  type ContractAuditLogItem,
+  type ErpEnvironment,
+  type VerifyOtpResponse,
+  type PrepareB2bResponse,
+  type SignB2bResponse,
+} from "@/lib/erp-api";
 
 interface ContractSignClientProps {
   initialToken: string;
@@ -293,6 +303,252 @@ function parseCertDate(dateStr?: string | null): Date | null {
   return isNaN(fallback.getTime()) ? null : fallback;
 }
 
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
+}
+
+function encodeDerLength(len: number): Uint8Array {
+  if (len < 0x80) return new Uint8Array([len]);
+  const bytes: number[] = [];
+  let n = len;
+  while (n > 0) {
+    bytes.unshift(n & 0xff);
+    n >>= 8;
+  }
+  return new Uint8Array([0x80 | bytes.length, ...bytes]);
+}
+
+function derTag(tag: number, content: Uint8Array): Uint8Array {
+  return concatBytes([new Uint8Array([tag]), encodeDerLength(content.length), content]);
+}
+
+const derSeq = (items: Uint8Array[]) => derTag(0x30, concatBytes(items));
+const derSet = (items: Uint8Array[]) => derTag(0x31, concatBytes(items));
+const derNull = () => new Uint8Array([0x05, 0x00]);
+const derOctetString = (bytes: Uint8Array) => derTag(0x04, bytes);
+const derBitString = (bytes: Uint8Array) => derTag(0x03, concatBytes([new Uint8Array([0]), bytes]));
+const derUtf8 = (str: string) => derTag(0x0c, new TextEncoder().encode(str));
+const derPrintable = (str: string) => derTag(0x13, new TextEncoder().encode(str));
+
+function derInt(bytes: Uint8Array): Uint8Array {
+  let start = 0;
+  while (start < bytes.length - 1 && bytes[start] === 0 && (bytes[start + 1] & 0x80) === 0) {
+    start++;
+  }
+  const trimmed = bytes.slice(start);
+  const needZero = trimmed.length === 0 || (trimmed[0] & 0x80) !== 0;
+  return derTag(0x02, needZero ? concatBytes([new Uint8Array([0]), trimmed]) : trimmed);
+}
+
+function derOid(oid: string): Uint8Array {
+  const arcs = oid.split(".").map((n) => Number(n));
+  const encoded: number[] = [arcs[0] * 40 + arcs[1]];
+  for (let i = 2; i < arcs.length; i++) {
+    let v = arcs[i];
+    const chunks: number[] = [];
+    do {
+      chunks.unshift((v & 0x7f) | (chunks.length > 0 ? 0x80 : 0));
+      v = Math.floor(v / 128);
+    } while (v > 0);
+    encoded.push(...chunks);
+  }
+  return derTag(0x06, new Uint8Array(encoded));
+}
+
+function derUtcTime(date: Date): Uint8Array {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const str = `${p(date.getUTCFullYear() % 100)}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}Z`;
+  return derTag(0x17, new TextEncoder().encode(str));
+}
+
+function derName(rdns: Array<{ oid: string; value: string; printable?: boolean }>): Uint8Array {
+  return derSeq(
+    rdns.map((r) =>
+      derSet([
+        derSeq([
+          derOid(r.oid),
+          r.printable ? derPrintable(r.value) : derUtf8(r.value),
+        ]),
+      ])
+    )
+  );
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64UrlToBytes(b64url: string): Uint8Array {
+  const std = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = std + "=".repeat((4 - (std.length % 4)) % 4);
+  const bin = atob(padded);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+}
+
+function bytesToBigInt(bytes: Uint8Array): bigint {
+  let res = BigInt(0);
+  for (let i = 0; i < bytes.length; i++) {
+    res = (res << BigInt(8)) + BigInt(bytes[i]);
+  }
+  return res;
+}
+
+function bigIntToBytes(val: bigint, len: number): Uint8Array {
+  const out = new Uint8Array(len);
+  let v = val;
+  const mask = BigInt(0xff);
+  const shift = BigInt(8);
+  for (let i = len - 1; i >= 0; i--) {
+    out[i] = Number(v & mask);
+    v >>= shift;
+  }
+  return out;
+}
+
+function modPow(base: bigint, exp: bigint, mod: bigint): bigint {
+  let result = BigInt(1);
+  let b = base % mod;
+  let e = exp;
+  const zero = BigInt(0);
+  const one = BigInt(1);
+  while (e > zero) {
+    if ((e & one) === one) result = (result * b) % mod;
+    b = (b * b) % mod;
+    e >>= one;
+  }
+  return result;
+}
+
+async function generateDevB2bKeyPairAndCert(params: {
+  taxCode: string;
+  companyName: string;
+  providerName: string;
+}): Promise<{
+  certBase64: string;
+  serialHex: string;
+  validFromIso: string;
+  validToIso: string;
+  privateJwk: JsonWebKey;
+}> {
+  const subtle = window.crypto?.subtle;
+  if (!subtle) {
+    throw new Error("Trình duyệt không hỗ trợ WebCrypto API để tạo chứng thư số giả lập.");
+  }
+
+  const keyPair = await subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"]
+  );
+
+  const spkiBytes = new Uint8Array(await subtle.exportKey("spki", keyPair.publicKey));
+  const privateJwk = await subtle.exportKey("jwk", keyPair.privateKey);
+
+  const serialBytes = new Uint8Array(8);
+  window.crypto.getRandomValues(serialBytes);
+  serialBytes[0] = (serialBytes[0] & 0x7f) | 0x01;
+  const serialHex = Array.from(serialBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .toUpperCase();
+
+  const now = new Date();
+  const validFrom = new Date(now.getTime() - 5 * 60 * 1000);
+  const validTo = new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000);
+  const sigAlgId = derSeq([derOid("1.2.840.113549.1.1.11"), derNull()]);
+
+  const subjectRdns = [
+    { oid: "0.9.2342.19200300.100.1.1", value: `MST:${params.taxCode}` },
+    { oid: "2.5.4.3", value: params.companyName },
+    { oid: "2.5.4.10", value: params.companyName },
+    { oid: "2.5.4.6", value: "VN", printable: true },
+  ];
+  const issuerRdns = [
+    { oid: "2.5.4.3", value: `${params.providerName} Dev Sandbox` },
+    { oid: "2.5.4.10", value: params.providerName },
+    { oid: "2.5.4.6", value: "VN", printable: true },
+  ];
+
+  const keyUsageBits = derTag(0x03, new Uint8Array([0x06, 0xc0]));
+  const extensions = derSeq([
+    derSeq([derOid("2.5.29.15"), new Uint8Array([0x01, 0x01, 0xff]), derOctetString(keyUsageBits)]),
+    derSeq([derOid("2.5.29.19"), derOctetString(derSeq([]))]),
+  ]);
+
+  const tbsCert = derSeq([
+    derTag(0xa0, derInt(new Uint8Array([2]))),
+    derInt(serialBytes),
+    sigAlgId,
+    derName(issuerRdns),
+    derSeq([derUtcTime(validFrom), derUtcTime(validTo)]),
+    derName(subjectRdns),
+    spkiBytes,
+    derTag(0xa3, extensions),
+  ]);
+
+  const tbsBuf = tbsCert.buffer.slice(tbsCert.byteOffset, tbsCert.byteOffset + tbsCert.byteLength) as ArrayBuffer;
+  const tbsSig = new Uint8Array(await subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, keyPair.privateKey, tbsBuf));
+  const certDer = derSeq([tbsCert, sigAlgId, derBitString(tbsSig)]);
+
+  return {
+    certBase64: bytesToBase64(certDer),
+    serialHex,
+    validFromIso: validFrom.toISOString(),
+    validToIso: validTo.toISOString(),
+    privateJwk,
+  };
+}
+
+function signSha256HashPkcs1v15(hashHex: string, privateJwk: JsonWebKey): string {
+  if (!privateJwk.n || !privateJwk.d) {
+    throw new Error("Thiếu khóa bí mật RSA để ký mã băm hợp đồng.");
+  }
+  const cleanHex = hashHex.trim();
+  const match = cleanHex.match(/.{1,2}/g);
+  if (!match || match.length !== 32) {
+    throw new Error("Mã băm SHA-256 (hash_to_sign) không hợp lệ.");
+  }
+  const hashBytes = new Uint8Array(match.map((b) => parseInt(b, 16)));
+  const digestInfoPrefix = new Uint8Array([
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+  ]);
+  const nBytes = base64UrlToBytes(privateJwk.n);
+  const k = nBytes.length;
+  const psLen = k - digestInfoPrefix.length - hashBytes.length - 3;
+  const em = new Uint8Array(k);
+  em[0] = 0x00;
+  em[1] = 0x01;
+  em.fill(0xff, 2, 2 + psLen);
+  em[2 + psLen] = 0x00;
+  em.set(digestInfoPrefix, 3 + psLen);
+  em.set(hashBytes, 3 + psLen + digestInfoPrefix.length);
+
+  const n = bytesToBigInt(nBytes);
+  const d = bytesToBigInt(base64UrlToBytes(privateJwk.d));
+  const sigInt = modPow(bytesToBigInt(em), d, n);
+  return bytesToBase64(bigIntToBytes(sigInt, k));
+}
+
 export function ContractSignClient({
   initialToken,
   initialContract,
@@ -420,13 +676,25 @@ export function ContractSignClient({
   const [b2bCertIsExpired, setB2bCertIsExpired] = useState(false);
   const [usbSessionId, setUsbSessionId] = useState("");
   const [usbActiveUrl, setUsbActiveUrl] = useState("");
-  const [b2bPkcs7, setB2bPkcs7] = useState("");
+  const [b2bWsConnected, setB2bWsConnected] = useState(false);
+  const [b2bCertBase64, setB2bCertBase64] = useState("");
+  const [b2bSignatureBase64, setB2bSignatureBase64] = useState("");
   const [b2bSignMethod, setB2bSignMethod] = useState<"usb" | "manual">("usb");
   const [selectedCaProvider, setSelectedCaProvider] = useState<string>("auto");
   const [usbStatus, setUsbStatus] = useState<string | null>(null);
   const [isConnectingUsb, setIsConnectingUsb] = useState(false);
   const [usbStatusType, setUsbStatusType] = useState<"idle" | "connecting" | "success" | "error">("idle");
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Business B2B Email OTP state
+  const [b2bOtpCode, setB2bOtpCode] = useState("");
+  const [b2bOtpVerified, setB2bOtpVerified] = useState(false);
+  const [b2bOtpVerifiedAt, setB2bOtpVerifiedAt] = useState<string | null>(null);
+  const [b2bOtpSending, setB2bOtpSending] = useState(false);
+  const [b2bOtpVerifying, setB2bOtpVerifying] = useState(false);
+  const [b2bOtpCooldown, setB2bOtpCooldown] = useState(0);
+  const [b2bOtpMessage, setB2bOtpMessage] = useState<string | null>(null);
+  const [b2bOtpError, setB2bOtpError] = useState<string | null>(null);
 
   const sigPadRef = useRef<SignaturePadRef | null>(null);
   const modalSigPadRef = useRef<SignaturePadRef | null>(null);
@@ -443,12 +711,6 @@ export function ContractSignClient({
       }
     }
   }, [contract, b2bTaxCode, b2bCompanyName]);
-
-  const getDirectErpBaseUrl = (env: "production" | "staging" | "local") => {
-    if (env === "staging") return "https://staging.nuocsachdinhto.com";
-    if (env === "local") return "http://localhost:3000";
-    return "https://erp.nuocsachdinhto.com";
-  };
 
   // Hàm tải lại hợp đồng và timeline lịch sử
   const refreshContractData = async () => {
@@ -535,6 +797,139 @@ export function ContractSignClient({
     return () => clearInterval(timer);
   }, [otpCooldown]);
 
+  // Handle B2B Email OTP countdown
+  useEffect(() => {
+    if (b2bOtpCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setB2bOtpCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [b2bOtpCooldown]);
+
+  const resetB2bOtpSession = (reason?: string) => {
+    setB2bOtpVerified(false);
+    setB2bOtpVerifiedAt(null);
+    setB2bOtpCode("");
+    setB2bOtpMessage(null);
+    setB2bOtpError(
+      reason ||
+        "Phiên xác thực OTP Email đã hết hạn (15 phút). Vui lòng nhận và xác thực lại mã OTP."
+    );
+  };
+
+  const isOtpSessionExpiredError = (code?: string, errorMsg?: string) => {
+    const normCode = (code || "").toUpperCase();
+    if (
+      normCode === "OTP_EXPIRED" ||
+      normCode === "OTP_NOT_VERIFIED" ||
+      normCode === "OTP_SESSION_EXPIRED" ||
+      normCode === "OTP_REQUIRED"
+    ) {
+      return true;
+    }
+    const lower = (errorMsg || "").toLowerCase();
+    return (
+      lower.includes("otp") &&
+      (lower.includes("hết hạn") ||
+        lower.includes("chưa xác thực") ||
+        lower.includes("expired") ||
+        lower.includes("15 phút"))
+    );
+  };
+
+  // Gửi OTP Email cho luồng Doanh nghiệp B2B
+  const handleSendB2bOtp = async () => {
+    if (b2bOtpCooldown > 0 || b2bOtpSending) return;
+    setB2bOtpSending(true);
+    setB2bOtpMessage(null);
+    setB2bOtpError(null);
+    setError(null);
+
+    try {
+      const { ok, data } = await postContractActionWithFallback<{
+        success: boolean;
+        error?: string;
+        message?: string;
+        remainingSeconds?: number;
+      }>(
+        initialToken,
+        "send-otp",
+        {
+          channel: "email",
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        },
+        currentEnv
+      );
+
+      if (ok && data?.success) {
+        setB2bOtpCooldown(60);
+        setB2bOtpMessage(
+          data.message ||
+            `Mã OTP đã được gửi đến email ${contract?.customer?.email || "đăng ký"}. Vui lòng kiểm tra hộp thư.`
+        );
+      } else {
+        if (data?.remainingSeconds) {
+          setB2bOtpCooldown(data.remainingSeconds);
+        }
+        setB2bOtpError(data?.error || "Không thể gửi mã OTP qua Email");
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setB2bOtpError(`Lỗi gửi yêu cầu OTP Email: ${msg}`);
+    } finally {
+      setB2bOtpSending(false);
+    }
+  };
+
+  // Xác thực OTP Email cho luồng Doanh nghiệp B2B (/verify-otp)
+  const handleVerifyB2bOtp = async () => {
+    const trimmed = b2bOtpCode.trim();
+    if (trimmed.length < 6) {
+      setB2bOtpError("Vui lòng nhập đủ 6 chữ số mã OTP Email.");
+      return;
+    }
+    if (b2bOtpVerifying) return;
+
+    setB2bOtpVerifying(true);
+    setB2bOtpError(null);
+    setB2bOtpMessage(null);
+    setError(null);
+    setFormError(null);
+
+    try {
+      const { ok, data } = await postContractActionWithFallback<VerifyOtpResponse>(
+        initialToken,
+        "verify-otp",
+        {
+          otp_code: trimmed,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        },
+        currentEnv
+      );
+
+      if (ok && data?.success) {
+        setB2bOtpVerified(true);
+        setB2bOtpVerifiedAt(data.verifiedAt || data.verified_at || new Date().toISOString());
+        setB2bOtpMessage("Đã xác thực OTP Email thành công.");
+        setB2bOtpError(null);
+      } else {
+        setB2bOtpVerified(false);
+        const attemptsHint =
+          typeof data?.remainingAttempts === "number"
+            ? ` (Còn ${data.remainingAttempts} lần thử)`
+            : "";
+        setB2bOtpError(
+          `${data?.error || "Mã OTP không chính xác hoặc đã hết hạn."}${attemptsHint}`
+        );
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setB2bOtpError(`Lỗi xác thực OTP Email: ${msg}`);
+    } finally {
+      setB2bOtpVerifying(false);
+    }
+  };
+
   // Request OTP
   const handleRequestOtp = async () => {
     if (otpCooldown > 0 || otpLoading) return;
@@ -542,58 +937,20 @@ export function ContractSignClient({
     setOtpMessage(null);
     setError(null);
 
-    const otpPayload = {
-      channel: otpChannel,
-      user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-      target_env: currentEnv,
-    };
-
     try {
-      let data: any = null;
-      let ok = false;
-
-      // 1. Thử qua proxy nội bộ Portal
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/send-otp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(otpPayload),
-        });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
-        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("HTTP 403"))) {
-          // Proxy bị chặn bởi Cloudflare -> Chuyển sang fallback gọi trực tiếp
-        } else {
-          data = resJson;
-          ok = res.ok;
-        }
-      } catch (proxyErr) {
-        console.warn("[portal] Proxy send-otp failed, fallback to direct ERP...", proxyErr);
-      }
-
-      // 2. Client-side Direct Fallback
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/send-otp`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              channel: otpChannel,
-              user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-            }),
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Direct send-otp fallback failed:", directErr);
-        }
-      }
+      const { ok, data } = await postContractActionWithFallback<{
+        success: boolean;
+        error?: string;
+        remainingSeconds?: number;
+      }>(
+        initialToken,
+        "send-otp",
+        {
+          channel: otpChannel,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        },
+        currentEnv
+      );
 
       if (ok && data?.success) {
         setOtpCooldown(60);
@@ -688,61 +1045,21 @@ export function ContractSignClient({
     setSigning(true);
 
     try {
-      const signPayload = {
-        signature_image_base64: signatureBase64,
-        otp_code: otpCode.trim(),
-        terms_agreed: true,
-        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        target_env: currentEnv,
-      };
-
-      let data: any = null;
-      let ok = false;
-
-      // 1. Thử qua proxy nội bộ Portal
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/sign`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(signPayload),
-        });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
-        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("HTTP 403"))) {
-          // Cloudflare block -> fallback direct
-        } else {
-          data = resJson;
-          ok = res.ok;
-        }
-      } catch (proxyErr) {
-        console.warn("[portal] Proxy sign failed, attempting direct ERP...", proxyErr);
-      }
-
-      // 2. Client-side Direct Fallback
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              signature_image_base64: signatureBase64,
-              otp_code: otpCode.trim(),
-              terms_agreed: true,
-              user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-            }),
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Direct sign fallback failed:", directErr);
-        }
-      }
+      const { ok, data } = await postContractActionWithFallback<{
+        success: boolean;
+        error?: string;
+        data?: { status?: string };
+      }>(
+        initialToken,
+        "sign",
+        {
+          signature_image_base64: signatureBase64,
+          otp_code: otpCode.trim(),
+          terms_agreed: true,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        },
+        currentEnv
+      );
 
       if (ok && data?.success) {
         setSignedSuccess(true);
@@ -790,13 +1107,98 @@ export function ContractSignClient({
     }
   };
 
+  const normalizeCertBase64 = (raw: string): string =>
+    raw
+      .replace(/-----BEGIN CERTIFICATE-----/gi, "")
+      .replace(/-----END CERTIFICATE-----/gi, "")
+      .replace(/\s+/g, "")
+      .trim();
+
+  const normalizeSignatureToBase64 = (sigRaw: string): string => {
+    let sigToSend = sigRaw.trim();
+    if (/^[0-9A-Fa-f]+$/.test(sigToSend) && sigToSend.length >= 128 && sigToSend.length % 2 === 0) {
+      try {
+        const match = sigToSend.match(/.{1,2}/g);
+        if (match) {
+          const u8 = new Uint8Array(match.map((byte) => parseInt(byte, 16)));
+          let binary = "";
+          for (let i = 0; i < u8.length; i++) {
+            binary += String.fromCharCode(u8[i]);
+          }
+          sigToSend = btoa(binary);
+        }
+      } catch {
+        // fallback
+      }
+    }
+    return sigToSend.replace(/\s+/g, "");
+  };
+
+  interface UsbCertConnectResult {
+    certBase64: string;
+    taxCode: string;
+    companyName: string;
+    serial: string;
+    issuer: string;
+    validTo: string;
+    activeUrl: string;
+    sessionId: string;
+    viaWs: boolean;
+  }
+
+  const signHashViaWebSocket = (hashHex: string, certSerial?: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      try {
+        const ws = new WebSocket("wss://127.0.0.1:15208");
+        const timer = setTimeout(() => {
+          try {
+            ws.close();
+          } catch {}
+          resolve(null);
+        }, 60000);
+
+        ws.onopen = () => {
+          ws.send(
+            JSON.stringify({
+              function: "signHash",
+              hash: hashHex,
+              hashAlg: "SHA256",
+              serialNumber: certSerial || undefined,
+            })
+          );
+        };
+
+        ws.onmessage = (event) => {
+          clearTimeout(timer);
+          try {
+            const resp = JSON.parse(event.data);
+            const sig = resp.signature || resp.signedHash || resp.data || "";
+            resolve(typeof sig === "string" && sig.trim() ? sig.trim() : null);
+          } catch {
+            resolve(null);
+          } finally {
+            try {
+              ws.close();
+            } catch {}
+          }
+        };
+
+        ws.onerror = () => {
+          clearTimeout(timer);
+          resolve(null);
+        };
+      } catch {
+        resolve(null);
+      }
+    });
+
   // B2B Bước 1: Kết nối USB Token & Đọc thông tin Chứng thư số (Đa nhà mạng CA)
-  const handleConnectUsbToken = async () => {
+  const handleConnectUsbToken = async (): Promise<UsbCertConnectResult | null> => {
     if (selectedCaProvider === "other") {
       setB2bSignMethod("manual");
       setUsbStatus("Đã chuyển sang chế độ dán chuỗi chữ ký PKCS#7 Base64 thủ công.");
       setUsbStatusType("idle");
-      return;
+      return null;
     }
 
     setIsConnectingUsb(true);
@@ -833,20 +1235,20 @@ export function ContractSignClient({
             setIsConnectingUsb(false);
             setUsbStatusType("error");
             setUsbStatus("Đã kết nối SignPlugin nhưng chưa tìm thấy USB Token. Vui lòng cắm USB Token vào máy tính.");
-            return;
+            return null;
           }
 
           setUsbStatus(
             "Đã kết nối SignPlugin. Vui lòng chọn chứng thư số của doanh nghiệp trên cửa sổ 'Select Certificate' và nhấn OK..."
           );
-          const certBase64 = await postSignPlugin(
+          const rawCertBase64 = await postSignPlugin(
             baseUrl,
             "/getCertificate",
             { sessionID: sessionId },
             60000
           );
 
-          if (!certBase64) {
+          if (!rawCertBase64) {
             const lastErr = await postSignPlugin(baseUrl, "/getLastErr", {}, 5000);
             setIsConnectingUsb(false);
             setUsbStatusType("error");
@@ -855,8 +1257,10 @@ export function ContractSignClient({
                 ? "Không tìm thấy thiết bị USB Token chứa chứng thư số đã chọn. Vui lòng cắm đúng USB Token vào máy tính."
                 : "Chưa chọn chứng thư số hoặc người dùng đã đóng cửa sổ chọn chứng thư (Mã: " + (lastErr || "N/A") + ")."
             );
-            return;
+            return null;
           }
+
+          const cleanCertBase64 = normalizeCertBase64(rawCertBase64);
 
           const [snb, cn, dn, issuer, validDate, expireDate] = await Promise.all([
             postSignPlugin(baseUrl, "/getCertSNB", {}, 5000),
@@ -874,14 +1278,18 @@ export function ContractSignClient({
 
           // Trích xuất MST từ DN nếu có (VD: MST:2301081775 hoặc UID=MST:2301081775)
           const mstMatch = dn.match(/MST[:=]([0-9\-]+)/i);
+          const extractedTaxCode = mstMatch && mstMatch[1] ? mstMatch[1] : b2bTaxCode;
           if (mstMatch && mstMatch[1]) {
             setB2bTaxCode(mstMatch[1]);
           }
+          const resolvedCompanyName = cn || b2bCompanyName;
           if (cn) {
             setB2bCompanyName(cn);
           }
+          const resolvedIssuer =
+            issuer || (selectedCaProvider !== "auto" ? selectedCaProvider : "Viettel-CA");
           setB2bCertSerial(snb || "");
-          setB2bCertIssuer(issuer || (selectedCaProvider !== "auto" ? selectedCaProvider : "Viettel-CA"));
+          setB2bCertIssuer(resolvedIssuer);
           setB2bCertValidTo(expireDate || "");
           if (validDate || expireDate) {
             setB2bCertValidRange(`${validDate || ""} - ${expireDate || ""}`);
@@ -896,14 +1304,16 @@ export function ContractSignClient({
             setUsbStatus(mismatchMsg);
             setFormError(mismatchMsg);
             setIsConnectingUsb(false);
-            return;
+            return null;
           }
 
           if (isExpired || isNotYetValid) {
             setB2bCertIsExpired(true);
             setUsbActiveUrl("");
             setUsbSessionId("");
-            setB2bPkcs7("");
+            setB2bWsConnected(false);
+            setB2bCertBase64("");
+            setB2bSignatureBase64("");
             setUsbStatusType("error");
             const errDetail = isExpired
               ? `Chứng thư số đã chọn đã HẾT HẠN vào ngày ${expireDate}`
@@ -912,23 +1322,34 @@ export function ContractSignClient({
             setUsbStatus(errMsg);
             setFormError(errMsg);
             setIsConnectingUsb(false);
-            return;
+            return null;
           }
 
           setB2bCertIsExpired(false);
-          // Lưu phiên SignPlugin để khi bấm "Ký Số Doanh Nghiệp (B2B)" ở Bước 2 sẽ gọi /signHash bật cửa sổ nhập PIN
           setUsbActiveUrl(baseUrl);
           setUsbSessionId(sessionId);
-          setB2bPkcs7(certBase64);
+          setB2bWsConnected(false);
+          setB2bCertBase64(cleanCertBase64);
+          setB2bSignatureBase64("");
           setB2bSignMethod("usb");
           setUsbStatusType("success");
           setUsbStatus(
-            `Đã đọc chứng thư số: ${cn || dn} | Serial: ${snb || "N/A"} | Nhà cung cấp: ${issuer || "CA"}${
+            `Đã đọc chứng thư số: ${cn || dn} | Serial: ${snb || "N/A"} | Nhà cung cấp: ${resolvedIssuer}${
               validDate && expireDate ? ` (${validDate} → ${expireDate})` : ""
-            }. Hãy nhấn 'Ký Số Doanh Nghiệp (B2B)' bên dưới và nhập mã PIN để hoàn tất ký.`
+            }. Hãy nhấn 'Ký số bằng USB Token' bên dưới và nhập mã PIN để hoàn tất ký.`
           );
           setIsConnectingUsb(false);
-          return;
+          return {
+            certBase64: cleanCertBase64,
+            taxCode: extractedTaxCode,
+            companyName: resolvedCompanyName,
+            serial: snb || "",
+            issuer: resolvedIssuer,
+            validTo: expireDate || "",
+            activeUrl: baseUrl,
+            sessionId,
+            viaWs: false,
+          };
         }
       } catch {
         // Thử URL tiếp theo
@@ -936,137 +1357,161 @@ export function ContractSignClient({
     }
 
     // 2. Fallback dò cổng WebSocket (BKAV-CA / VNPT-CA / Viettel-CA vSigner: 15208, 11284)
-    try {
-      const ws = new WebSocket("wss://127.0.0.1:15208");
-      
-      const timeout = setTimeout(() => {
-        try {
-          ws.close();
-        } catch {
-          // ignore
-        }
-        setIsConnectingUsb(false);
-        setUsbStatusType("error");
-        setUsbStatus(
-          "Không tìm thấy phần mềm ký số (Viettel-CA / VNPT-CA / FPT-CA / MISA / BKAV SignPlugin) đang chạy hoặc trình duyệt đang chặn kết nối Local Network."
-        );
-        setB2bSignMethod("manual");
-      }, 2500);
+    return await new Promise<UsbCertConnectResult | null>((resolve) => {
+      try {
+        const ws = new WebSocket("wss://127.0.0.1:15208");
 
-      ws.onopen = () => {
-        clearTimeout(timeout);
-        setUsbStatusType("connecting");
-        setUsbStatus("Đã kết nối với phần mềm ký số qua WebSocket. Đang đọc danh sách chứng thư số từ USB Token...");
-        ws.send(JSON.stringify({ function: "getCertificateList" }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const resp = JSON.parse(event.data);
-          const rawCerts = (resp.certificates || []) as Array<{
-            subject?: string;
-            serialNumber?: string;
-            serial?: string;
-            issuer?: string;
-            validFrom?: string;
-            validTo?: string;
-            expireDate?: string;
-            signature?: string;
-            certBase64?: string;
-          }>;
-
-          if (rawCerts.length > 0) {
-            const now = Date.now();
-            const analyzedCerts = rawCerts.map((c) => {
-              const expDateStr = c.validTo || c.expireDate || '';
-              const exp = parseCertDate(expDateStr);
-              const isExp = exp ? exp.getTime() < now : false;
-              return { ...c, expDateStr, parsedExp: exp, isExpired: isExp };
-            });
-
-            // Ưu tiên chứng thư còn hiệu lực và thời hạn dài nhất
-            const validCerts = analyzedCerts
-              .filter((c) => !c.isExpired)
-              .sort((a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0));
-
-            if (validCerts.length === 0) {
-              const latestExpired = analyzedCerts.sort(
-                (a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0)
-              )[0];
-              setB2bCertIsExpired(true);
-              setUsbStatusType("error");
-              const msg = `⚠️ Tất cả chứng thư số trong USB Token đều đã hết hạn (chứng thư gần nhất hết hạn ngày ${latestExpired.expDateStr || 'N/A'}). Vui lòng liên hệ nhà cung cấp chữ ký số để gia hạn.`;
-              setUsbStatus(msg);
-              setFormError(msg);
-              return;
-            }
-
-            const activeCert = validCerts[0];
-            setB2bCertIsExpired(false);
-            setB2bCompanyName(activeCert.subject || "");
-            setB2bCertSerial(activeCert.serialNumber || activeCert.serial || "");
-            setB2bCertIssuer(activeCert.issuer || selectedCaProvider);
-            setB2bCertValidTo(activeCert.expDateStr || "");
-            if (activeCert.validFrom || activeCert.expDateStr) {
-              setB2bCertValidRange(`${activeCert.validFrom || ""} - ${activeCert.expDateStr || ""}`);
-            }
-            setB2bPkcs7(activeCert.signature || activeCert.certBase64 || "USB_TOKEN_CERT_READY");
-            setUsbStatusType("success");
-            setUsbStatus(`Đã nhận diện chứng thư còn hiệu lực: ${activeCert.subject} (Hạn: ${activeCert.expDateStr || 'N/A'})`);
-          } else {
-            setUsbStatusType("error");
-            setUsbStatus("Đã kết nối nhưng chưa phát hiện thẻ USB Token được cắm vào máy tính.");
+        const timeout = setTimeout(() => {
+          try {
+            ws.close();
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore ws parse error
-        } finally {
           setIsConnectingUsb(false);
-        }
-      };
+          setUsbStatusType("error");
+          setUsbStatus(
+            "Không tìm thấy phần mềm ký số (Viettel-CA / VNPT-CA / FPT-CA / MISA / BKAV SignPlugin) đang chạy hoặc trình duyệt đang chặn kết nối Local Network."
+          );
+          setB2bSignMethod("manual");
+          resolve(null);
+        }, 2500);
 
-      ws.onerror = () => {
-        clearTimeout(timeout);
+        ws.onopen = () => {
+          clearTimeout(timeout);
+          setUsbStatusType("connecting");
+          setUsbStatus("Đã kết nối với phần mềm ký số qua WebSocket. Đang đọc danh sách chứng thư số từ USB Token...");
+          ws.send(JSON.stringify({ function: "getCertificateList" }));
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const resp = JSON.parse(event.data);
+            const rawCerts = (resp.certificates || []) as Array<{
+              subject?: string;
+              serialNumber?: string;
+              serial?: string;
+              issuer?: string;
+              validFrom?: string;
+              validTo?: string;
+              expireDate?: string;
+              signature?: string;
+              certBase64?: string;
+            }>;
+
+            if (rawCerts.length > 0) {
+              const now = Date.now();
+              const analyzedCerts = rawCerts.map((c) => {
+                const expDateStr = c.validTo || c.expireDate || "";
+                const exp = parseCertDate(expDateStr);
+                const isExp = exp ? exp.getTime() < now : false;
+                return { ...c, expDateStr, parsedExp: exp, isExpired: isExp };
+              });
+
+              const validCerts = analyzedCerts
+                .filter((c) => !c.isExpired)
+                .sort((a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0));
+
+              if (validCerts.length === 0) {
+                const latestExpired = analyzedCerts.sort(
+                  (a, b) => (b.parsedExp?.getTime() || 0) - (a.parsedExp?.getTime() || 0)
+                )[0];
+                setB2bCertIsExpired(true);
+                setUsbStatusType("error");
+                const msg = `⚠️ Tất cả chứng thư số trong USB Token đều đã hết hạn (chứng thư gần nhất hết hạn ngày ${latestExpired.expDateStr || "N/A"}). Vui lòng liên hệ nhà cung cấp chữ ký số để gia hạn.`;
+                setUsbStatus(msg);
+                setFormError(msg);
+                resolve(null);
+                return;
+              }
+
+              const activeCert = validCerts[0];
+              const cleanWsCert = normalizeCertBase64(activeCert.certBase64 || "");
+              const mstMatch = (activeCert.subject || "").match(/MST[:=]([0-9\-]+)/i);
+              const resolvedTax = mstMatch && mstMatch[1] ? mstMatch[1] : b2bTaxCode;
+              const resolvedCompany = activeCert.subject || b2bCompanyName;
+              const resolvedSerial = activeCert.serialNumber || activeCert.serial || "";
+              const resolvedIssuer = activeCert.issuer || selectedCaProvider;
+
+              if (mstMatch && mstMatch[1]) setB2bTaxCode(mstMatch[1]);
+              setB2bCertIsExpired(false);
+              setB2bCompanyName(resolvedCompany);
+              setB2bCertSerial(resolvedSerial);
+              setB2bCertIssuer(resolvedIssuer);
+              setB2bCertValidTo(activeCert.expDateStr || "");
+              if (activeCert.validFrom || activeCert.expDateStr) {
+                setB2bCertValidRange(`${activeCert.validFrom || ""} - ${activeCert.expDateStr || ""}`);
+              }
+              setUsbActiveUrl("");
+              setUsbSessionId("");
+              setB2bWsConnected(Boolean(cleanWsCert));
+              setB2bCertBase64(cleanWsCert);
+              setB2bSignatureBase64("");
+              if (!cleanWsCert) {
+                setUsbStatusType("error");
+                setUsbStatus(
+                  "Phần mềm ký số WebSocket không trả về dữ liệu chứng thư X.509 (certBase64). Vui lòng dùng SignPlugin cổng 14007/14407."
+                );
+                resolve(null);
+                return;
+              }
+              setB2bSignMethod("usb");
+              setUsbStatusType("success");
+              setUsbStatus(
+                `Đã nhận diện chứng thư còn hiệu lực: ${activeCert.subject} (Hạn: ${activeCert.expDateStr || "N/A"})`
+              );
+              resolve({
+                certBase64: cleanWsCert,
+                taxCode: resolvedTax,
+                companyName: resolvedCompany,
+                serial: resolvedSerial,
+                issuer: resolvedIssuer,
+                validTo: activeCert.expDateStr || "",
+                activeUrl: "",
+                sessionId: "",
+                viaWs: true,
+              });
+            } else {
+              setUsbStatusType("error");
+              setUsbStatus("Đã kết nối nhưng chưa phát hiện thẻ USB Token được cắm vào máy tính.");
+              resolve(null);
+            }
+          } catch {
+            resolve(null);
+          } finally {
+            setIsConnectingUsb(false);
+            try {
+              ws.close();
+            } catch {}
+          }
+        };
+
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          setIsConnectingUsb(false);
+          setUsbStatusType("error");
+          setUsbStatus(
+            "Không thể kết nối phần mềm ký số (cổng 14007 / 14407 / 15208). Vui lòng kiểm tra USB Token, bật SignPlugin hoặc cấp quyền 'Ứng dụng trên thiết bị (Local Network)' trên trình duyệt."
+          );
+          setB2bSignMethod("manual");
+          resolve(null);
+        };
+      } catch {
         setIsConnectingUsb(false);
         setUsbStatusType("error");
-        setUsbStatus(
-          "Không thể kết nối phần mềm ký số (cổng 14007 / 14407 / 15208). Vui lòng kiểm tra USB Token, bật SignPlugin hoặc cấp quyền 'Ứng dụng trên thiết bị (Local Network)' trên trình duyệt."
-        );
+        setUsbStatus("Trình duyệt chặn kết nối nội bộ tới thiết bị USB Token.");
         setB2bSignMethod("manual");
-      };
-    } catch {
-      setIsConnectingUsb(false);
-      setUsbStatusType("error");
-      setUsbStatus("Trình duyệt chặn kết nối nội bộ tới thiết bị USB Token.");
-      setB2bSignMethod("manual");
-    }
+        resolve(null);
+      }
+    });
   };
 
-  // B2B Bước 2: Ký số bằng USB Token (Nhập PIN qua /signHash) và gửi lên Server
+  // B2B Bước 2: Ký số PAdES 2-Phase bằng USB Token (Prepare -> Sign Hash -> Finalize)
   const handleSignBusiness = async () => {
     setError(null);
     setFormError(null);
 
-    if (!b2bTaxCode.trim()) {
-      const msg = "Vui lòng nhập Mã số thuế doanh nghiệp (*)";
-      setFormError(msg);
-      setError(msg);
-      return;
-    }
-
-    const contractTaxCode = (contract?.customer?.taxCode || contract?.customerCode || "")
-      .trim()
-      .replace(/[\s\-]/g, "");
-    const inputTaxCode = b2bTaxCode.trim().replace(/[\s\-]/g, "");
-
-    if (contractTaxCode && inputTaxCode && contractTaxCode !== inputTaxCode && !isDev) {
-      const msg = `Mã số thuế trên USB Token (${b2bTaxCode}) không trùng khớp với Mã số thuế của Bên B trong hợp đồng (${contract?.customer?.taxCode || contractTaxCode}). Vui lòng cắm đúng USB Token của doanh nghiệp để ký.`;
-      setFormError(msg);
-      setError(msg);
-      return;
-    }
-
-    if (b2bCertIsExpired) {
-      const msg = `Chứng thư số đã hết hạn (Hạn: ${b2bCertValidTo || "N/A"}). Vui lòng kết nối lại và chọn chứng thư số còn hiệu lực trước khi ký!`;
+    if (!b2bOtpVerified) {
+      const msg = "Vui lòng xác thực mã OTP Email trước khi thực hiện ký số doanh nghiệp.";
       setFormError(msg);
       setError(msg);
       return;
@@ -1079,13 +1524,67 @@ export function ContractSignClient({
       return;
     }
 
-    if (!b2bPkcs7.trim() && !usbSessionId) {
-      // Trong môi trường Dev: tự động nạp chữ ký số giả lập và ký để không làm nghẽn kiểm thử
-      if (isDev) {
+    if (b2bCertIsExpired) {
+      const msg = `Chứng thư số đã hết hạn (Hạn: ${b2bCertValidTo || "N/A"}). Vui lòng kết nối lại và chọn chứng thư số còn hiệu lực trước khi ký!`;
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    // Bước 1: Đọc chứng thư số từ USB Token nếu chưa có chứng thư hoặc chưa có phiên SignPlugin/WS
+    let effectiveCertBase64 = b2bCertBase64.trim();
+    let effectiveTaxCode = b2bTaxCode.trim();
+    let effectiveCompanyName = b2bCompanyName.trim();
+    let effectiveSerial = b2bCertSerial.trim();
+    let effectiveValidTo = b2bCertValidTo.trim();
+    let effectiveIssuer =
+      b2bCertIssuer.trim() ||
+      (selectedCaProvider !== "auto" && selectedCaProvider !== "other" ? selectedCaProvider : "");
+    let effectiveActiveUrl = usbActiveUrl;
+    let effectiveSessionId = usbSessionId;
+    let effectiveViaWs = b2bWsConnected;
+
+    if (b2bSignMethod === "usb" && (!effectiveCertBase64 || (!effectiveActiveUrl && !effectiveViaWs))) {
+      const connected = await handleConnectUsbToken();
+      if (!connected || !connected.certBase64) {
+        return;
+      }
+      effectiveCertBase64 = connected.certBase64;
+      effectiveTaxCode = connected.taxCode.trim() || effectiveTaxCode;
+      effectiveCompanyName = connected.companyName.trim() || effectiveCompanyName;
+      effectiveSerial = connected.serial.trim() || effectiveSerial;
+      effectiveValidTo = connected.validTo.trim() || effectiveValidTo;
+      effectiveIssuer = connected.issuer.trim() || effectiveIssuer;
+      effectiveActiveUrl = connected.activeUrl;
+      effectiveSessionId = connected.sessionId;
+      effectiveViaWs = connected.viaWs;
+    }
+
+    if (!effectiveTaxCode) {
+      const msg = "Vui lòng nhập Mã số thuế doanh nghiệp (*)";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    const contractTaxCode = (contract?.customer?.taxCode || contract?.customerCode || "")
+      .trim()
+      .replace(/[\s\-]/g, "");
+    const inputTaxCode = effectiveTaxCode.replace(/[\s\-]/g, "");
+
+    if (contractTaxCode && inputTaxCode && contractTaxCode !== inputTaxCode && !isDev) {
+      const msg = `Mã số thuế trên USB Token (${effectiveTaxCode}) không trùng khớp với Mã số thuế của Bên B trong hợp đồng (${contract?.customer?.taxCode || contractTaxCode}). Vui lòng cắm đúng USB Token của doanh nghiệp để ký.`;
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
+
+    if (!effectiveCertBase64) {
+      if (isDev && b2bSignMethod === "manual" && b2bSignatureBase64.trim()) {
         await handleDevMockSignB2b(true);
         return;
       }
-      const msg = "Vui lòng nhấn 'Kết Nối USB Token Chữ Ký Số' trước khi ký";
+      const msg = "Không tìm thấy dữ liệu chứng thư số X.509 từ USB Token. Vui lòng kết nối lại USB Token.";
       setFormError(msg);
       setError(msg);
       return;
@@ -1093,32 +1592,63 @@ export function ContractSignClient({
 
     setSigning(true);
     try {
-      let finalSignatureBase64 = b2bPkcs7.trim();
+      const userAgentStr = typeof navigator !== "undefined" ? navigator.userAgent : undefined;
 
-      // Nếu đang có phiên kết nối SignPlugin thật (cổng 14007/14407), gọi /signHash để bật hộp thoại nhập mã PIN của USB Token
-      if (usbActiveUrl && usbSessionId) {
+      // Bước 2: Gọi ERP /prepare-b2b để lấy session_id & hash_to_sign (SHA-256 64 ký tự hex)
+      setUsbStatus("Đang khởi tạo phiên ký số PAdES và nhận mã băm PDF từ máy chủ ERP...");
+      const { ok: prepOk, data: prepData } =
+        await postContractActionWithFallback<PrepareB2bResponse>(
+          initialToken,
+          "prepare-b2b",
+          {
+            cert_base64: effectiveCertBase64,
+            tax_code: effectiveTaxCode,
+            company_name: effectiveCompanyName || undefined,
+            cert_serial: effectiveSerial || undefined,
+            valid_to: effectiveValidTo || undefined,
+            issuer: effectiveIssuer || undefined,
+            user_agent: userAgentStr,
+          },
+          currentEnv
+        );
+
+      if (!prepOk || !prepData?.success || !prepData.session_id || !prepData.hash_to_sign) {
+        if (isOtpSessionExpiredError(prepData?.code, prepData?.error)) {
+          resetB2bOtpSession(prepData?.error);
+        }
+        const msg =
+          prepData?.error ||
+          "Không thể khởi tạo phiên ký số PAdES. Vui lòng kiểm tra chứng thư số, Mã số thuế hoặc trạng thái OTP.";
+        setFormError(msg);
+        setError(msg);
+        setSigning(false);
+        return;
+      }
+
+      if (prepData.extracted_tax_code && !effectiveTaxCode) {
+        effectiveTaxCode = prepData.extracted_tax_code;
+        setB2bTaxCode(prepData.extracted_tax_code);
+      }
+
+      // Bước 3: Gọi USB Token SignPlugin /signHash (hoặc WebSocket) ký đúng lên hash_to_sign
+      let finalSignatureBase64 = b2bSignatureBase64.trim();
+      const hashToSignHex = prepData.hash_to_sign.trim().toUpperCase();
+
+      if (effectiveActiveUrl && effectiveSessionId) {
         setUsbStatus("Vui lòng nhập Mã PIN của USB Token trên cửa sổ hiện lên để ký số hợp đồng...");
-        const payloadText = `${contract?.contractNumber || initialToken}|${b2bTaxCode.trim()}|${Date.now()}`;
-        const msgBuffer = new TextEncoder().encode(payloadText);
-        const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
-        const hashHex = Array.from(new Uint8Array(hashBuffer))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("")
-          .toUpperCase();
-
         const sigFromToken = await postSignPlugin(
-          usbActiveUrl,
+          effectiveActiveUrl,
           "/signHash",
           {
-            sessionID: usbSessionId,
-            HashVal: hashHex,
+            sessionID: effectiveSessionId,
+            HashVal: hashToSignHex,
             HashOpt: "2", // 2 = SHA-256 theo đặc tả libmobileid.dll (Viettel/FPT/VNPT SignPlugin)
           },
           60000
         );
 
         if (!sigFromToken) {
-          const lastErr = await postSignPlugin(usbActiveUrl, "/getLastErr", {}, 5000);
+          const lastErr = await postSignPlugin(effectiveActiveUrl, "/getLastErr", {}, 5000);
           let errMsg = `Chưa hoàn tất nhập mã PIN USB Token hoặc bạn đã hủy thao tác ký (Mã lỗi: ${lastErr || "N/A"}).`;
           if (lastErr === "100102" || lastErr === "100105") {
             errMsg = "Không tìm thấy thiết bị USB Token khi thực hiện ký. Vui lòng kiểm tra lại cổng cắm USB Token.";
@@ -1127,7 +1657,7 @@ export function ContractSignClient({
           } else if (lastErr === "100201") {
             errMsg = "Không thể truy cập khóa bí mật trong USB Token. Vui lòng rút ra cắm lại thiết bị.";
           } else if (lastErr === "100103" || lastErr === "100205") {
-            errMsg = "Phiên làm việc với USB Token đã hết hạn. Vui lòng bấm 'Kết Nối USB Token Chữ Ký Số' để kết nối lại.";
+            errMsg = "Phiên làm việc với USB Token đã hết hạn. Vui lòng bấm 'Đọc Lại Chứng Thư USB Token' để kết nối lại.";
           }
           setFormError(errMsg);
           setError(errMsg);
@@ -1135,94 +1665,65 @@ export function ContractSignClient({
           return;
         }
 
-        // Chuẩn hóa chữ ký số: nếu SignPlugin trả về chuỗi Hex, chuyển sang Base64
-        let sigToSend = sigFromToken.trim();
-        if (/^[0-9A-Fa-f]+$/.test(sigToSend) && sigToSend.length >= 256 && sigToSend.length % 2 === 0) {
-          try {
-            const match = sigToSend.match(/.{1,2}/g);
-            if (match) {
-              const u8 = new Uint8Array(match.map((byte) => parseInt(byte, 16)));
-              let binary = "";
-              for (let i = 0; i < u8.length; i++) {
-                binary += String.fromCharCode(u8[i]);
-              }
-              sigToSend = btoa(binary);
-            }
-          } catch {
-            // fallback
-          }
+        finalSignatureBase64 = normalizeSignatureToBase64(sigFromToken);
+        setB2bSignatureBase64(finalSignatureBase64);
+      } else if (effectiveViaWs) {
+        setUsbStatus("Vui lòng xác nhận mã PIN trên phần mềm ký số WebSocket...");
+        const wsSig = await signHashViaWebSocket(hashToSignHex, effectiveSerial);
+        if (!wsSig) {
+          const errMsg = "Không nhận được chữ ký từ phần mềm ký số WebSocket hoặc bạn đã hủy nhập PIN.";
+          setFormError(errMsg);
+          setError(errMsg);
+          setSigning(false);
+          return;
         }
-
-        finalSignatureBase64 = sigToSend;
-        setB2bPkcs7(sigToSend);
+        finalSignatureBase64 = normalizeSignatureToBase64(wsSig);
+        setB2bSignatureBase64(finalSignatureBase64);
       }
 
-      const b2bPayload = {
-        signature_base64: finalSignatureBase64,
-        tax_code: b2bTaxCode.trim(),
-        company_name: b2bCompanyName.trim() || undefined,
-        cert_serial: b2bCertSerial.trim() || undefined,
-        valid_to: b2bCertValidTo.trim() || undefined,
-        issuer:
-          b2bCertIssuer.trim() ||
-          (selectedCaProvider !== "auto" && selectedCaProvider !== "other"
-            ? selectedCaProvider
-            : undefined),
-        terms_agreed: true,
-        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        target_env: currentEnv,
-      };
-
-      let data: any = null;
-      let ok = false;
-
-      // 1. Thử qua proxy nội bộ Portal
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b?env=${currentEnv}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(b2bPayload),
-        });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
-        } else if (!res.ok && (res.status === 403 || resJson?.error?.includes("Không thể kết nối") || resJson?.error?.includes("403"))) {
-          // Cloudflare block -> fallback direct
-        } else {
-          data = resJson;
-          ok = res.ok;
-        }
-      } catch (proxyErr) {
-        console.warn("[portal] Proxy sign-b2b failed, attempting direct ERP...", proxyErr);
+      if (!finalSignatureBase64) {
+        const msg = "Chưa có dữ liệu chữ ký số từ USB Token. Vui lòng thử ký lại.";
+        setFormError(msg);
+        setError(msg);
+        setSigning(false);
+        return;
       }
 
-      // 2. Client-side Direct Fallback: nếu proxy bị Cloudflare 403 hoặc lỗi mạng, fetch trực tiếp từ máy chủ ERP
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign-b2b`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(b2bPayload),
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Direct sign-b2b fallback failed:", directErr);
-        }
-      }
+      // Bước 4: Gửi chữ ký đã ký hash_to_sign cùng session_id + cert_base64 lên ERP /sign-b2b
+      setUsbStatus("Đang hoàn tất niêm phong chữ ký số PAdES lên hợp đồng PDF...");
+      const { ok: signOk, data: signData } =
+        await postContractActionWithFallback<SignB2bResponse>(
+          initialToken,
+          "sign-b2b",
+          {
+            session_id: prepData.session_id,
+            signature_base64: finalSignatureBase64,
+            cert_base64: effectiveCertBase64,
+            tax_code: effectiveTaxCode,
+            company_name: effectiveCompanyName || undefined,
+            cert_serial: effectiveSerial || undefined,
+            valid_to: effectiveValidTo || undefined,
+            issuer: effectiveIssuer || undefined,
+            terms_agreed: true,
+            user_agent: userAgentStr,
+          },
+          currentEnv
+        );
 
-      if (ok && data?.success) {
+      if (signOk && signData?.success) {
         setSignedSuccess(true);
-        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
+        setContract((prev) =>
+          prev ? { ...prev, status: signData?.data?.status || "signed_by_customer" } : prev
+        );
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        const msg = data?.error || "Ký số doanh nghiệp thất bại. Vui lòng kiểm tra lại Mã số thuế và Token.";
+        if (isOtpSessionExpiredError(signData?.code, signData?.error)) {
+          resetB2bOtpSession(signData?.error);
+        }
+        const msg =
+          signData?.error ||
+          "Ký số doanh nghiệp thất bại. Vui lòng kiểm tra lại Mã số thuế, chứng thư số và Token.";
         setFormError(msg);
         setError(msg);
       }
@@ -1247,102 +1748,195 @@ export function ContractSignClient({
         window.location.port === "3001" ||
         window.location.port === "3000"));
 
-  // Nạp mẫu chữ ký test Profile
+  // Nạp mẫu chữ ký test Profile (tạo chứng thư X.509 RSA-2048 tự ký hợp lệ)
   const handleFillDevMock = () => {
-    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "";
-    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH MTV đầu tư Minh Phong";
-    const providerName = selectedCaProvider !== "auto" && selectedCaProvider !== "other" ? selectedCaProvider : "Viettel-CA";
-    const mockPkcs7 = `MOCK_PKCS7_${providerName.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
-    setB2bTaxCode(mockTaxCode);
-    setB2bCompanyName(mockCompany);
-    setB2bCertSerial(`DEV-SERIAL-${Date.now().toString().slice(-6)}`);
-    setB2bCertIssuer(`${providerName} (Dev Test)`);
-    setUsbActiveUrl("");
-    setUsbSessionId("");
-    setB2bPkcs7(mockPkcs7);
-    setB2bSignMethod("manual");
-    setUsbStatus(`🟢 [Dev Sandbox] Đã nạp chữ ký số mẫu ${providerName} thành công. Bạn có thể nhấn 'Ký Số Doanh Nghiệp' ngay.`);
-    setUsbStatusType("success");
-    setFormError(null);
+    void handleDevMockSignB2b(false);
   };
 
-  // Giả lập Ký số B2B (Doanh nghiệp USB Token)
+  // Giả lập Ký số B2B (Doanh nghiệp USB Token) theo đúng chu trình 2-Phase PAdES:
+  // 1. Verify OTP -> 2. Generate RSA-2048 & X.509 (UID=MST) -> 3. prepare-b2b -> 4. RSA sign hash -> 5. sign-b2b
   const handleDevMockSignB2b = async (autoSubmit = true) => {
     setError(null);
-    const mockTaxCode = b2bTaxCode.trim() || contract?.customer?.taxCode || contract?.customerCode || "";
-    const mockCompany = b2bCompanyName.trim() || contract?.customer?.fullName || "Công ty TNHH MTV đầu tư Minh Phong";
-    const providerName = selectedCaProvider !== "auto" && selectedCaProvider !== "other" ? selectedCaProvider : "VNPT-CA / Viettel-CA";
-    const mockPkcs7 = `MOCK_PKCS7_${providerName.replace(/[^a-zA-Z0-9]/g, "_")}_${Date.now()}`;
+    setFormError(null);
+    setB2bOtpError(null);
 
-    setB2bTaxCode(mockTaxCode);
-    setB2bCompanyName(mockCompany);
-    setB2bPkcs7(mockPkcs7);
-    setConsentLegal(true);
-    setUsbStatus(`🟢 [Dev Sandbox] Đã nạp chứng thư số giả lập ${providerName} (Test Profile)`);
-    setB2bSignMethod("manual");
+    const mockTaxCode = (
+      b2bTaxCode.trim() ||
+      contract?.customer?.taxCode ||
+      contract?.customerCode ||
+      ""
+    ).trim();
+    const mockCompany = (
+      b2bCompanyName.trim() ||
+      contract?.customer?.fullName ||
+      "Doanh nghiệp kiểm thử"
+    ).trim();
+    const providerName =
+      selectedCaProvider !== "auto" && selectedCaProvider !== "other"
+        ? selectedCaProvider
+        : "Viettel-CA";
+    const issuerLabel = `${providerName} Dev Sandbox`;
 
-    if (!autoSubmit) return;
+    if (!mockTaxCode) {
+      const msg = "Vui lòng nhập Mã số thuế doanh nghiệp trước khi thực hiện ký giả lập B2B.";
+      setFormError(msg);
+      setError(msg);
+      return;
+    }
 
     setSigning(true);
     try {
-      const mockB2bPayload = {
-        signature_base64: mockPkcs7,
-        tax_code: mockTaxCode,
-        company_name: mockCompany,
-        cert_serial: `DEV-TOKEN-SERIAL-${Date.now().toString().slice(-6)}`,
-        issuer: `${providerName} Test Profile (Dev)`,
-        terms_agreed: true,
-        user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
-        target_env: currentEnv,
-      };
+      const userAgentStr = typeof navigator !== "undefined" ? navigator.userAgent : undefined;
 
-      let data: any = null;
-      let ok = false;
+      // Bước 1: Sinh cặp khóa RSA-2048 & chứng thư số X.509 tự ký mang UID=MST:<taxCode>
+      setUsbStatus("🟢 [Dev Sandbox] Đang khởi tạo cặp khóa RSA-2048 & chứng thư X.509 tự ký...");
+      setUsbStatusType("connecting");
 
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/sign-b2b?env=${currentEnv}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(mockB2bPayload),
+      const { certBase64, serialHex, validFromIso, validToIso, privateJwk } =
+        await generateDevB2bKeyPairAndCert({
+          taxCode: mockTaxCode,
+          companyName: mockCompany,
+          providerName,
         });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
+
+      const validFromDate = new Date(validFromIso).toLocaleDateString("vi-VN");
+      const validToDate = new Date(validToIso).toLocaleDateString("vi-VN");
+
+      setB2bTaxCode(mockTaxCode);
+      setB2bCompanyName(mockCompany);
+      setB2bCertSerial(serialHex);
+      setB2bCertIssuer(issuerLabel);
+      setB2bCertValidRange(`${validFromDate} - ${validToDate}`);
+      setB2bCertValidTo(validToIso);
+      setB2bCertIsExpired(false);
+      setUsbActiveUrl("");
+      setUsbSessionId("");
+      setB2bWsConnected(false);
+      setB2bCertBase64(certBase64);
+      setB2bSignatureBase64("");
+      setConsentLegal(true);
+      setB2bSignMethod("usb");
+      setUsbStatusType("success");
+      setUsbStatus(
+        `🟢 [Dev Sandbox] Đã tạo chứng thư số X.509 RSA-2048 hợp lệ (UID=MST:${mockTaxCode}, Serial: ${serialHex}).`
+      );
+
+      if (!autoSubmit) {
+        if (!b2bOtpVerified) {
+          setB2bOtpCode("123456");
+          setB2bOtpMessage(
+            "Đã điền sẵn OTP mẫu 123456. Nếu máy chủ chưa bật ALLOW_DEV_OTP_BYPASS, vui lòng bấm 'Gửi mã OTP qua Email' để nhận OTP thật."
+          );
         }
-      } catch (proxyErr) {
-        console.warn("[portal] Dev mock proxy sign-b2b failed:", proxyErr);
+        return;
       }
 
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign-b2b`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(mockB2bPayload),
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Dev mock direct sign-b2b failed:", directErr);
+      // Bước 2: Nếu chưa verify OTP -> gọi /verify-otp với mã dev 123456 (hoặc mã đã nhập)
+      if (!b2bOtpVerified) {
+        const otpAttempt = b2bOtpCode.trim() || "123456";
+        setB2bOtpCode(otpAttempt);
+        const { ok: otpOk, data: otpData } =
+          await postContractActionWithFallback<VerifyOtpResponse>(
+            initialToken,
+            "verify-otp",
+            {
+              otp_code: otpAttempt,
+              user_agent: userAgentStr,
+            },
+            currentEnv
+          );
+
+        if (!otpOk || !otpData?.success) {
+          const rawErr = otpData?.error || "Chưa xác thực được mã OTP Email.";
+          const guideMsg = `${rawErr} Nếu máy chủ chưa bật ALLOW_DEV_OTP_BYPASS, vui lòng bấm "Gửi mã OTP qua Email", nhập mã OTP từ hộp thư và bấm "Xác nhận OTP" trước khi ký giả lập.`;
+          setB2bOtpVerified(false);
+          setB2bOtpError(guideMsg);
+          setError(guideMsg);
+          return;
         }
+
+        setB2bOtpVerified(true);
+        setB2bOtpVerifiedAt(
+          otpData.verifiedAt || otpData.verified_at || new Date().toISOString()
+        );
+        setB2bOtpMessage("Đã xác thực OTP Email thành công.");
+        setB2bOtpError(null);
       }
 
-      if (ok && data?.success) {
+      // Bước 3: Gọi prepare-b2b lấy session_id & hash_to_sign
+      setUsbStatus("🟢 [Dev Sandbox] Đang gọi /prepare-b2b để lấy mã băm PAdES...");
+      const { ok: prepOk, data: prepData } =
+        await postContractActionWithFallback<PrepareB2bResponse>(
+          initialToken,
+          "prepare-b2b",
+          {
+            cert_base64: certBase64,
+            tax_code: mockTaxCode,
+            company_name: mockCompany,
+            cert_serial: serialHex,
+            valid_to: validToIso,
+            issuer: issuerLabel,
+            user_agent: userAgentStr,
+          },
+          currentEnv
+        );
+
+      if (!prepOk || !prepData?.success || !prepData.session_id || !prepData.hash_to_sign) {
+        if (isOtpSessionExpiredError(prepData?.code, prepData?.error)) {
+          resetB2bOtpSession(prepData?.error);
+        }
+        const msg = prepData?.error || "Không thể khởi tạo phiên ký giả lập B2B (/prepare-b2b).";
+        setFormError(msg);
+        setError(msg);
+        return;
+      }
+
+      // Bước 4: Dùng khóa bí mật RSA-2048 vừa tạo ký PKCS#1 v1.5 DigestInfo(SHA-256) lên hash_to_sign
+      setUsbStatus("🟢 [Dev Sandbox] Đang ký RSA-SHA256 lên hash_to_sign...");
+      const signatureBase64 = signSha256HashPkcs1v15(prepData.hash_to_sign, privateJwk);
+      setB2bSignatureBase64(signatureBase64);
+
+      // Bước 5: Gọi sign-b2b hoàn tất ký PAdES
+      setUsbStatus("🟢 [Dev Sandbox] Đang gửi chữ ký số lên /sign-b2b...");
+      const { ok: signOk, data: signData } =
+        await postContractActionWithFallback<SignB2bResponse>(
+          initialToken,
+          "sign-b2b",
+          {
+            session_id: prepData.session_id,
+            signature_base64: signatureBase64,
+            cert_base64: certBase64,
+            tax_code: mockTaxCode,
+            company_name: mockCompany,
+            cert_serial: serialHex,
+            valid_to: validToIso,
+            issuer: issuerLabel,
+            terms_agreed: true,
+            user_agent: userAgentStr,
+          },
+          currentEnv
+        );
+
+      if (signOk && signData?.success) {
         setSignedSuccess(true);
-        setContract((prev) => (prev ? { ...prev, status: data?.data?.status || "signed_by_customer" } : prev));
+        setContract((prev) =>
+          prev ? { ...prev, status: signData?.data?.status || "signed_by_customer" } : prev
+        );
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        setError(data?.error || "Giả lập ký số doanh nghiệp thất bại.");
+        if (isOtpSessionExpiredError(signData?.code, signData?.error)) {
+          resetB2bOtpSession(signData?.error);
+        }
+        const msg = signData?.error || "Giả lập ký số doanh nghiệp thất bại.";
+        setFormError(msg);
+        setError(msg);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(`Lỗi giả lập ký số: ${message}`);
+      const msg = `Lỗi giả lập ký số B2B: ${message}`;
+      setFormError(msg);
+      setError(msg);
     } finally {
       setSigning(false);
     }
@@ -1382,48 +1976,21 @@ export function ContractSignClient({
 
     setSigning(true);
     try {
-      const mockB2cPayload = {
-        signature_image_base64: effectiveSignature,
-        otp_code: "123456",
-        terms_agreed: true,
-        target_env: currentEnv,
-      };
-
-      let data: any = null;
-      let ok = false;
-
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/sign?env=${currentEnv}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(mockB2cPayload),
-        });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
-        }
-      } catch (proxyErr) {
-        console.warn("[portal] Dev mock proxy sign failed:", proxyErr);
-      }
-
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/sign`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(mockB2cPayload),
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Dev mock direct sign failed:", directErr);
-        }
-      }
+      const { ok, data } = await postContractActionWithFallback<{
+        success: boolean;
+        error?: string;
+        data?: { status?: string };
+      }>(
+        initialToken,
+        "sign",
+        {
+          signature_image_base64: effectiveSignature,
+          otp_code: otpCode.trim() || "123456",
+          terms_agreed: true,
+          user_agent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
+        },
+        currentEnv
+      );
 
       if (ok && data?.success) {
         setSignedSuccess(true);
@@ -1431,7 +1998,12 @@ export function ContractSignClient({
         setIsSignModalOpen(false);
         await refreshContractData();
       } else {
-        setError(data?.error || "Giả lập ký hợp đồng cá nhân thất bại.");
+        const rawErr = data?.error || "Giả lập ký hợp đồng cá nhân thất bại.";
+        const msg = rawErr.includes("Chưa có yêu cầu OTP")
+          ? `${rawErr} (Nếu máy chủ chưa bật ALLOW_DEV_OTP_BYPASS, vui lòng bấm "Tiếp tục & Nhận mã OTP" và nhập mã OTP thật.)`
+          : rawErr;
+        setFormError(msg);
+        setError(msg);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1448,37 +2020,10 @@ export function ContractSignClient({
     setError(null);
     setFormError(null);
     try {
-      let data: any = null;
-      let ok = false;
-
-      try {
-        const res = await fetch(`/api/portal/contracts/${initialToken}/reset-dev?env=${currentEnv}`, {
-          method: "POST",
-        });
-        const resJson = await res.json().catch(() => null);
-        if (res.ok && resJson?.success) {
-          data = resJson;
-          ok = true;
-        }
-      } catch (proxyErr) {
-        console.warn("[portal] Reset proxy failed:", proxyErr);
-      }
-
-      if (!ok) {
-        try {
-          const directBaseUrl = getDirectErpBaseUrl(currentEnv);
-          const directRes = await fetch(`${directBaseUrl}/api/portal/contracts/${initialToken}/reset-dev`, {
-            method: "POST",
-          });
-          const directJson = await directRes.json().catch(() => null);
-          if (directJson) {
-            data = directJson;
-            ok = directRes.ok && directJson.success;
-          }
-        } catch (directErr) {
-          console.warn("[portal] Reset direct failed:", directErr);
-        }
-      }
+      const { ok, data } = await postContractActionWithFallback<{
+        success: boolean;
+        error?: string;
+      }>(initialToken, "reset-dev", {}, currentEnv);
 
       if (ok && data?.success) {
         setSignedSuccess(false);
@@ -1487,9 +2032,28 @@ export function ContractSignClient({
         setSavedSignatureBase64("");
         setOtpCode("");
         setOtpMessage(null);
+        setB2bOtpCode("");
+        setB2bOtpVerified(false);
+        setB2bOtpVerifiedAt(null);
+        setB2bOtpCooldown(0);
+        setB2bOtpMessage(null);
+        setB2bOtpError(null);
+        setB2bCertBase64("");
+        setB2bSignatureBase64("");
+        setB2bCertSerial("");
+        setB2bCertIssuer("");
+        setB2bCertValidRange("");
+        setB2bCertValidTo("");
+        setB2bCertIsExpired(false);
+        setUsbSessionId("");
+        setUsbActiveUrl("");
+        setB2bWsConnected(false);
+        setUsbStatus(null);
+        setUsbStatusType("idle");
+        setConsentLegal(false);
         await refreshContractData();
       } else {
-        setError(data.error || "Không thể reset hợp đồng");
+        setError(data?.error || "Không thể reset hợp đồng");
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -2758,298 +3322,57 @@ export function ContractSignClient({
                 </div>
               ) : (
                 // ==================== KHÁCH HÀNG DOANH NGHIỆP B2B ====================
-                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                  <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 4 }}>
-                      Mã số thuế doanh nghiệp (*):
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Ví dụ: 2301081775"
-                      value={b2bTaxCode}
-                      onChange={(e) => {
-                        setB2bTaxCode(e.target.value.trim());
-                        if (formError) setFormError(null);
-                      }}
-                      style={{
-                        width: "100%",
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        border: !b2bTaxCode && formError ? "1.5px solid #ef4444" : "1px solid #cbd5e1",
-                        fontSize: 13,
-                        fontWeight: 600,
-                      }}
-                    />
-                  </div>
-
-                  <div>
-                    <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 4 }}>
-                      Nhà cung cấp chữ ký số (CA):
-                    </label>
-                    <select
-                      value={selectedCaProvider}
-                      onChange={(e) => setSelectedCaProvider(e.target.value)}
-                      style={{
-                        width: "100%",
-                        padding: "8px 10px",
-                        borderRadius: 6,
-                        border: "1px solid #cbd5e1",
-                        fontSize: 13,
-                        fontWeight: 500,
-                        backgroundColor: "#ffffff",
-                        color: "#1e293b",
-                      }}
-                    >
-                      {CA_PROVIDERS.map((ca) => (
-                        <option key={ca.id} value={ca.id}>
-                          {ca.name}
-                        </option>
-                      ))}
-                    </select>
-                    <span style={{ fontSize: 11, color: "#64748b", marginTop: 2, display: "block" }}>
-                      Hỗ trợ tất cả các nhà cung cấp: VNPT, Viettel, FPT, BKAV, MISA...
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handleConnectUsbToken}
-                    disabled={isConnectingUsb || signing}
-                    style={{
-                      background: isConnectingUsb ? "#f1f5f9" : "#f8fafc",
-                      border: "1px solid #cbd5e1",
-                      padding: "10px 14px",
-                      borderRadius: 8,
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: isConnectingUsb ? "#64748b" : "#1e293b",
-                      cursor: isConnectingUsb ? "not-allowed" : "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 8,
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    {isConnectingUsb ? (
-                      <>
-                        <RefreshCw size={15} className="animate-spin" color="#2563eb" />
-                        <span>Đang dò tìm thiết bị USB Token...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Building2 size={16} color="#2563eb" />
-                        <span>Kết Nối USB Token Chữ Ký Số</span>
-                      </>
-                    )}
-                  </button>
-
-                  {/* Phản hồi trạng thái kết nối USB Token */}
-                  {usbStatusType === "error" ? (
-                    <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>
-                      <div style={{ fontWeight: 700, color: "#92400e", display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
-                        <AlertCircle size={15} />
-                        Chưa kết nối được phần mềm ký số USB Token
-                      </div>
-                      <p style={{ margin: "0 0 6px", color: "#78350f", lineHeight: 1.4, fontSize: 11 }}>
-                        {usbStatus || "Vui lòng cắm USB Token và bật phần mềm ký số (Viettel-CA SignPlugin, VNPT-CA, FPT-CA, BKAV, MISA...)."}
-                      </p>
-                      <div style={{ background: "#fef3c7", borderRadius: 6, padding: "6px 8px", marginBottom: 8, fontSize: 10.5, color: "#92400e", lineHeight: 1.4 }}>
-                        <strong>💡 Nếu đã bật SignPlugin mà vẫn báo lỗi trên Chrome/Edge mới:</strong>
-                        <div>1. Bấm biểu tượng <strong>Cài đặt (Tune/Ổ khóa)</strong> cạnh thanh địa chỉ URL → Bật <strong>&quot;Ứng dụng trên thiết bị&quot; (Local network)</strong> sang <strong>Cho phép</strong>.</div>
-                        <div>2. Hoặc mở <code>chrome://flags/#local-network-access-check</code> → chọn <strong>Disabled</strong> → <strong>Relaunch</strong>.</div>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        <button
-                          type="button"
-                          onClick={handleFillDevMock}
-                          style={{
-                            background: "#ffffff",
-                            color: "#b45309",
-                            border: "1px solid #d97706",
-                            padding: "5px 10px",
-                            borderRadius: 6,
-                            fontSize: 11,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                          }}
-                        >
-                          ⚡ Tự Động Nạp Chữ Ký Test
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDevMockSignB2b(true)}
-                          disabled={signing}
-                          style={{
-                            background: "#d97706",
-                            color: "#ffffff",
-                            border: "none",
-                            padding: "5px 10px",
-                            borderRadius: 6,
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: signing ? "not-allowed" : "pointer",
-                          }}
-                        >
-                          ⚡ Ký Giả Lập 1-Click
-                        </button>
-                      </div>
-                    </div>
-                  ) : b2bCertIsExpired ? (
-                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", color: "#991b1b", fontSize: 12 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
-                        <AlertCircle size={15} color="#dc2626" style={{ flexShrink: 0 }} />
-                        <span>Chứng thư số USB Token đã hết hạn!</span>
-                      </div>
-                      <div style={{ fontSize: 11, lineHeight: 1.5, color: "#b91c1c", paddingLeft: 21 }}>
-                        <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
-                        <div><strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
-                        <div><strong>Thời hạn:</strong> <span style={{ textDecoration: "line-through" }}>{b2bCertValidRange}</span> (ĐÃ HẾT HẠN)</div>
-                        <div style={{ marginTop: 4, fontWeight: 600 }}>
-                          ⚠️ Vui lòng cắm đúng USB Token còn hạn, nhấn &quot;Kết Nối USB Token&quot; và chọn chứng thư số mới.
-                        </div>
-                      </div>
-                    </div>
-                  ) : usbStatusType === "success" ? (
-                    <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 12px", color: "#166534", fontSize: 12 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
-                        <CheckCircle2 size={15} color="#16a34a" style={{ flexShrink: 0 }} />
-                        <span>Đã kết nối Chứng thư số USB Token</span>
-                      </div>
-                      {b2bCertSerial ? (
-                        <div style={{ fontSize: 11, lineHeight: 1.5, color: "#15803d", paddingLeft: 21 }}>
-                          <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
-                          <div><strong>MST:</strong> {b2bTaxCode} | <strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
-                          <div><strong>Nhà cung cấp:</strong> {b2bCertIssuer || "CA"}{b2bCertValidRange ? ` (${b2bCertValidRange})` : ""}</div>
-                          <div style={{ marginTop: 4, color: "#047857", fontWeight: 600 }}>
-                            👉 Nhấn &quot;Ký Số Doanh Nghiệp (B2B)&quot; bên dưới để nhập mã PIN và hoàn tất ký.
-                          </div>
-                        </div>
-                      ) : (
-                        <div style={{ paddingLeft: 21, fontSize: 11 }}>{usbStatus}</div>
-                      )}
-                    </div>
-                  ) : usbStatus && (
-                    <p style={{ margin: 0, fontSize: 11, color: "#64748b", background: "#f1f5f9", padding: 8, borderRadius: 6 }}>
-                      {usbStatus}
-                    </p>
-                  )}
-
-                  {b2bSignMethod === "manual" && (
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                        <label style={{ fontSize: 11, fontWeight: 600, color: "#334155" }}>
-                          Chuỗi chữ ký PKCS#7 Base64:
-                        </label>
-                        {isDev && (
-                          <button
-                            type="button"
-                            onClick={handleFillDevMock}
-                            style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 11, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0 }}
-                          >
-                            Nạp chuỗi test
-                          </button>
-                        )}
-                      </div>
-                      <textarea
-                        rows={3}
-                        placeholder="Dán chuỗi chữ ký PKCS#7 Base64 tại đây..."
-                        value={b2bPkcs7}
-                        onChange={(e) => {
-                          setB2bPkcs7(e.target.value.trim());
-                          if (formError) setFormError(null);
-                        }}
-                        style={{
-                          width: "100%",
-                          padding: "6px 8px",
-                          borderRadius: 6,
-                          border: !b2bPkcs7 && formError ? "1.5px solid #ef4444" : "1px solid #cbd5e1",
-                          fontSize: 11,
-                          fontFamily: "monospace",
-                        }}
-                      />
-                    </div>
-                  )}
-
-                  {/* Hiển thị lỗi form trực tiếp ngay trên nút ký B2B */}
-                  {formError && (
-                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                      <AlertCircle size={15} style={{ flexShrink: 0 }} />
-                      <span>{formError}</span>
-                    </div>
-                  )}
-
-                  {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 8,
-                      cursor: "pointer",
-                      background: consentLegal ? "#f0fdf4" : "#f8fafc",
-                      border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
-                      borderRadius: 8,
-                      padding: "8px 10px",
-                      marginTop: 2,
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={consentLegal}
-                      onChange={(e) => {
-                        setConsentLegal(e.target.checked);
-                        if (e.target.checked && formError?.includes("điều khoản")) {
-                          setFormError(null);
-                        }
-                      }}
-                      style={{
-                        marginTop: 2,
-                        cursor: "pointer",
-                        accentColor: "#2563eb",
-                        width: 15,
-                        height: 15,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
-                      Đại diện doanh nghiệp xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử bằng chữ ký số.
-                    </span>
-                  </label>
-
-                  <button
-                    type="button"
-                    onClick={handleSignBusiness}
-                    disabled={signing || isConnectingUsb}
-                    style={{
-                      background: signing ? "#94a3b8" : "#2563eb",
-                      color: "#ffffff",
-                      border: "none",
-                      padding: "12px",
-                      borderRadius: 10,
-                      fontWeight: 700,
-                      fontSize: 14,
-                      cursor: signing || isConnectingUsb ? "not-allowed" : "pointer",
-                      boxShadow: "0 4px 10px rgba(37,99,235,0.25)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 8,
-                    }}
-                  >
-                    {signing ? (
-                      <>
-                        <RefreshCw size={17} className="animate-spin" />
-                        <span>Đang xử lý ký số...</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck size={18} />
-                        <span>Ký Số Doanh Nghiệp (B2B)</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                <ContractB2bSignPanel
+                  variant="sidebar"
+                  contract={contract}
+                  isDev={isDev}
+                  signing={signing}
+                  isConnectingUsb={isConnectingUsb}
+                  consentLegal={consentLegal}
+                  onConsentLegalChange={setConsentLegal}
+                  formError={formError}
+                  onClearFormError={() => setFormError(null)}
+                  b2bOtpCode={b2bOtpCode}
+                  onB2bOtpCodeChange={(val) => {
+                    setB2bOtpCode(val);
+                    if (b2bOtpError) setB2bOtpError(null);
+                  }}
+                  b2bOtpVerified={b2bOtpVerified}
+                  b2bOtpVerifiedAt={b2bOtpVerifiedAt}
+                  b2bOtpSending={b2bOtpSending}
+                  b2bOtpVerifying={b2bOtpVerifying}
+                  b2bOtpCooldown={b2bOtpCooldown}
+                  b2bOtpMessage={b2bOtpMessage}
+                  b2bOtpError={b2bOtpError}
+                  onSendB2bOtp={handleSendB2bOtp}
+                  onVerifyB2bOtp={handleVerifyB2bOtp}
+                  b2bTaxCode={b2bTaxCode}
+                  onTaxCodeChange={setB2bTaxCode}
+                  selectedCaProvider={selectedCaProvider}
+                  onCaProviderChange={setSelectedCaProvider}
+                  caProviders={CA_PROVIDERS}
+                  b2bCompanyName={b2bCompanyName}
+                  b2bCertSerial={b2bCertSerial}
+                  b2bCertIssuer={b2bCertIssuer}
+                  b2bCertValidRange={b2bCertValidRange}
+                  b2bCertIsExpired={b2bCertIsExpired}
+                  b2bCertBase64={b2bCertBase64}
+                  usbStatus={usbStatus}
+                  usbStatusType={usbStatusType}
+                  b2bSignMethod={b2bSignMethod}
+                  b2bSignatureBase64={b2bSignatureBase64}
+                  onSignatureBase64Change={setB2bSignatureBase64}
+                  onConnectUsbToken={() => {
+                    void handleConnectUsbToken();
+                  }}
+                  onSignBusiness={() => {
+                    void handleSignBusiness();
+                  }}
+                  onFillDevMock={handleFillDevMock}
+                  onDevMockSignB2b={(auto) => {
+                    void handleDevMockSignB2b(auto);
+                  }}
+                />
               )}
             </div>
           )}
@@ -3715,314 +4038,58 @@ export function ContractSignClient({
                 </div>
               </div>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-                <div>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 4 }}>
-                    Mã số thuế doanh nghiệp (*):
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ví dụ: 2301081775"
-                    value={b2bTaxCode}
-                    onChange={(e) => {
-                      setB2bTaxCode(e.target.value.trim());
-                      if (formError) setFormError(null);
-                    }}
-                    style={{
-                      width: "100%",
-                      padding: "8px 10px",
-                      borderRadius: 6,
-                      border: !b2bTaxCode && formError ? "1.5px solid #ef4444" : "1px solid #cbd5e1",
-                      fontSize: 13,
-                      fontWeight: 600,
-                    }}
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "#334155", marginBottom: 4 }}>
-                    Nhà cung cấp chữ ký số (CA):
-                  </label>
-                  <select
-                    value={selectedCaProvider}
-                    onChange={(e) => setSelectedCaProvider(e.target.value)}
-                    style={{
-                      width: "100%",
-                      padding: "8px 10px",
-                      borderRadius: 6,
-                      border: "1px solid #cbd5e1",
-                      fontSize: 13,
-                      fontWeight: 500,
-                      backgroundColor: "#ffffff",
-                      color: "#1e293b",
-                    }}
-                  >
-                    {CA_PROVIDERS.map((ca) => (
-                      <option key={ca.id} value={ca.id}>
-                        {ca.name}
-                      </option>
-                    ))}
-                  </select>
-                  <span style={{ fontSize: 11, color: "#64748b", marginTop: 2, display: "block" }}>
-                    Hỗ trợ tất cả các nhà cung cấp: VNPT, Viettel, FPT, BKAV, MISA...
-                  </span>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleConnectUsbToken}
-                  disabled={isConnectingUsb || signing}
-                  style={{
-                    background: isConnectingUsb ? "#f1f5f9" : "#f8fafc",
-                    border: "1px solid #cbd5e1",
-                    padding: "9px 12px",
-                    borderRadius: 8,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: isConnectingUsb ? "#64748b" : "#1e293b",
-                    cursor: isConnectingUsb ? "not-allowed" : "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                  }}
-                >
-                  {isConnectingUsb ? (
-                    <>
-                      <RefreshCw size={14} className="animate-spin" color="#2563eb" />
-                      <span>Đang dò tìm thiết bị USB Token...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Building2 size={15} color="#2563eb" />
-                      <span>Kết Nối USB Token Chữ Ký Số</span>
-                    </>
-                  )}
-                </button>
-
-                {/* Phản hồi trạng thái USB Token trong Modal */}
-                {usbStatusType === "error" ? (
-                  <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>
-                    <div style={{ fontWeight: 700, color: "#92400e", display: "flex", alignItems: "center", gap: 5, marginBottom: 4 }}>
-                      <AlertCircle size={15} />
-                      Chưa kết nối được phần mềm ký số USB Token
-                    </div>
-                    <p style={{ margin: "0 0 6px", color: "#78350f", lineHeight: 1.4, fontSize: 11 }}>
-                      {usbStatus || "Vui lòng cắm USB Token và bật phần mềm ký số (Viettel-CA SignPlugin, VNPT-CA, FPT-CA, BKAV, MISA...)."}
-                    </p>
-                    <div style={{ background: "#fef3c7", borderRadius: 6, padding: "6px 8px", marginBottom: 8, fontSize: 10.5, color: "#92400e", lineHeight: 1.4 }}>
-                      <strong>💡 Nếu đã bật SignPlugin mà vẫn báo lỗi trên Chrome/Edge mới:</strong>
-                      <div>1. Bấm biểu tượng <strong>Cài đặt (Tune/Ổ khóa)</strong> cạnh thanh địa chỉ URL → Bật <strong>&quot;Ứng dụng trên thiết bị&quot; (Local network)</strong> sang <strong>Cho phép</strong>.</div>
-                      <div>2. Hoặc mở <code>chrome://flags/#local-network-access-check</code> → chọn <strong>Disabled</strong> → <strong>Relaunch</strong>.</div>
-                    </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        onClick={handleFillDevMock}
-                        style={{
-                          background: "#ffffff",
-                          color: "#b45309",
-                          border: "1px solid #d97706",
-                          padding: "5px 10px",
-                          borderRadius: 6,
-                          fontSize: 11,
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                      >
-                        ⚡ Nạp Chữ Ký Test
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDevMockSignB2b(true)}
-                        disabled={signing}
-                        style={{
-                          background: "#d97706",
-                          color: "#ffffff",
-                          border: "none",
-                          padding: "5px 10px",
-                          borderRadius: 6,
-                          fontSize: 11,
-                          fontWeight: 700,
-                          cursor: signing ? "not-allowed" : "pointer",
-                        }}
-                      >
-                        ⚡ Ký Giả Lập 1-Click
-                      </button>
-                    </div>
-                  </div>
-                ) : b2bCertIsExpired ? (
-                  <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "10px 12px", color: "#991b1b", fontSize: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
-                      <AlertCircle size={15} color="#dc2626" style={{ flexShrink: 0 }} />
-                      <span>Chứng thư số USB Token đã hết hạn!</span>
-                    </div>
-                    <div style={{ fontSize: 11, lineHeight: 1.5, color: "#b91c1c", paddingLeft: 21 }}>
-                      <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
-                      <div><strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
-                      <div><strong>Thời hạn:</strong> <span style={{ textDecoration: "line-through" }}>{b2bCertValidRange}</span> (ĐÃ HẾT HẠN)</div>
-                      <div style={{ marginTop: 4, fontWeight: 600 }}>
-                        ⚠️ Vui lòng cắm đúng USB Token còn hạn, nhấn &quot;Kết Nối USB Token&quot; và chọn chứng thư số mới.
-                      </div>
-                    </div>
-                  </div>
-                ) : usbStatusType === "success" ? (
-                  <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 12px", color: "#166534", fontSize: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 700, marginBottom: 4 }}>
-                      <CheckCircle2 size={15} color="#16a34a" style={{ flexShrink: 0 }} />
-                      <span>Đã kết nối Chứng thư số USB Token</span>
-                    </div>
-                    {b2bCertSerial ? (
-                      <div style={{ fontSize: 11, lineHeight: 1.5, color: "#15803d", paddingLeft: 21 }}>
-                        <div><strong>Đơn vị:</strong> {b2bCompanyName}</div>
-                        <div><strong>MST:</strong> {b2bTaxCode} | <strong>Serial:</strong> <code style={{ fontSize: 10.5 }}>{b2bCertSerial}</code></div>
-                        <div><strong>Nhà cung cấp:</strong> {b2bCertIssuer || "CA"}{b2bCertValidRange ? ` (${b2bCertValidRange})` : ""}</div>
-                        <div style={{ marginTop: 4, color: "#047857", fontWeight: 600 }}>
-                          👉 Nhấn &quot;Ký Số Doanh Nghiệp&quot; bên dưới để nhập mã PIN và hoàn tất ký.
-                        </div>
-                      </div>
-                    ) : (
-                      <div style={{ paddingLeft: 21, fontSize: 11 }}>{usbStatus}</div>
-                    )}
-                  </div>
-                ) : usbStatus && (
-                  <p style={{ margin: 0, fontSize: 11, color: "#64748b" }}>{usbStatus}</p>
-                )}
-
-                {b2bSignMethod === "manual" && (
-                  <div>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                      <label style={{ fontSize: 11, fontWeight: 600, color: "#334155" }}>
-                        Chuỗi chữ ký PKCS#7 Base64:
-                      </label>
-                      {isDev && (
-                        <button
-                          type="button"
-                          onClick={handleFillDevMock}
-                          style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 11, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0 }}
-                        >
-                          Nạp chuỗi test
-                        </button>
-                      )}
-                    </div>
-                    <textarea
-                      rows={3}
-                      placeholder="Dán chuỗi chữ ký PKCS#7 Base64 tại đây..."
-                      value={b2bPkcs7}
-                      onChange={(e) => {
-                        setB2bPkcs7(e.target.value.trim());
-                        if (formError) setFormError(null);
-                      }}
-                      style={{
-                        width: "100%",
-                        padding: "6px 8px",
-                        borderRadius: 6,
-                        border: !b2bPkcs7 && formError ? "1.5px solid #ef4444" : "1px solid #cbd5e1",
-                        fontSize: 11,
-                        fontFamily: "monospace",
-                      }}
-                    />
-                  </div>
-                )}
-
-                {/* Hiển thị lỗi form trực tiếp ngay trên nút ký B2B trong modal */}
-                {formError && (
-                  <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", color: "#b91c1c", fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                    <AlertCircle size={15} style={{ flexShrink: 0 }} />
-                    <span>{formError}</span>
-                  </div>
-                )}
-
-                {/* Cam kết pháp lý bắt buộc (Terms & Conditions Consent) */}
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 8,
-                    cursor: "pointer",
-                    background: consentLegal ? "#f0fdf4" : "#f8fafc",
-                    border: consentLegal ? "1px solid #86efac" : "1px solid #e2e8f0",
-                    borderRadius: 8,
-                    padding: "8px 10px",
-                    marginTop: 2,
-                    transition: "all 0.15s ease",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={consentLegal}
-                    onChange={(e) => {
-                      setConsentLegal(e.target.checked);
-                      if (e.target.checked && formError?.includes("điều khoản")) {
-                        setFormError(null);
-                      }
-                    }}
-                    style={{
-                      marginTop: 2,
-                      cursor: "pointer",
-                      accentColor: "#2563eb",
-                      width: 15,
-                      height: 15,
-                      flexShrink: 0,
-                    }}
-                  />
-                  <span style={{ fontSize: 11.5, color: "#334155", lineHeight: 1.45 }}>
-                    Đại diện doanh nghiệp xác nhận đã đọc, hiểu rõ và đồng ý toàn bộ điều khoản Hợp đồng dịch vụ cấp nước và các quy định pháp luật về giao kết hợp đồng điện tử bằng chữ ký số.
-                  </span>
-                </label>
-
-                <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
-                  <button
-                    type="button"
-                    onClick={() => setIsSignModalOpen(false)}
-                    style={{
-                      flex: 1,
-                      background: "#f1f5f9",
-                      border: "1px solid #cbd5e1",
-                      color: "#475569",
-                      padding: "11px",
-                      borderRadius: 10,
-                      fontWeight: 600,
-                      fontSize: 13,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Đóng
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSignBusiness}
-                    disabled={signing || isConnectingUsb}
-                    style={{
-                      flex: 2,
-                      background: signing ? "#94a3b8" : "#2563eb",
-                      color: "#ffffff",
-                      border: "none",
-                      padding: "11px",
-                      borderRadius: 10,
-                      fontWeight: 700,
-                      fontSize: 13,
-                      cursor: signing || isConnectingUsb ? "not-allowed" : "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 6,
-                    }}
-                  >
-                    {signing ? (
-                      <>
-                        <RefreshCw size={15} className="animate-spin" />
-                        <span>Đang xử lý...</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck size={16} />
-                        <span>Ký Số Doanh Nghiệp</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
+              <ContractB2bSignPanel
+                variant="modal"
+                contract={contract}
+                isDev={isDev}
+                signing={signing}
+                isConnectingUsb={isConnectingUsb}
+                consentLegal={consentLegal}
+                onConsentLegalChange={setConsentLegal}
+                formError={formError}
+                onClearFormError={() => setFormError(null)}
+                b2bOtpCode={b2bOtpCode}
+                onB2bOtpCodeChange={(val) => {
+                  setB2bOtpCode(val);
+                  if (b2bOtpError) setB2bOtpError(null);
+                }}
+                b2bOtpVerified={b2bOtpVerified}
+                b2bOtpVerifiedAt={b2bOtpVerifiedAt}
+                b2bOtpSending={b2bOtpSending}
+                b2bOtpVerifying={b2bOtpVerifying}
+                b2bOtpCooldown={b2bOtpCooldown}
+                b2bOtpMessage={b2bOtpMessage}
+                b2bOtpError={b2bOtpError}
+                onSendB2bOtp={handleSendB2bOtp}
+                onVerifyB2bOtp={handleVerifyB2bOtp}
+                b2bTaxCode={b2bTaxCode}
+                onTaxCodeChange={setB2bTaxCode}
+                selectedCaProvider={selectedCaProvider}
+                onCaProviderChange={setSelectedCaProvider}
+                caProviders={CA_PROVIDERS}
+                b2bCompanyName={b2bCompanyName}
+                b2bCertSerial={b2bCertSerial}
+                b2bCertIssuer={b2bCertIssuer}
+                b2bCertValidRange={b2bCertValidRange}
+                b2bCertIsExpired={b2bCertIsExpired}
+                b2bCertBase64={b2bCertBase64}
+                usbStatus={usbStatus}
+                usbStatusType={usbStatusType}
+                b2bSignMethod={b2bSignMethod}
+                b2bSignatureBase64={b2bSignatureBase64}
+                onSignatureBase64Change={setB2bSignatureBase64}
+                onConnectUsbToken={() => {
+                  void handleConnectUsbToken();
+                }}
+                onSignBusiness={() => {
+                  void handleSignBusiness();
+                }}
+                onFillDevMock={handleFillDevMock}
+                onDevMockSignB2b={(auto) => {
+                  void handleDevMockSignB2b(auto);
+                }}
+                onCloseModal={() => setIsSignModalOpen(false)}
+              />
             )}
           </div>
         </div>

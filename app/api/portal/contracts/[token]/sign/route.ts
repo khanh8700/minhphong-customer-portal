@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { signContractIndividual } from "@/lib/erp-api";
+import { getErpHttpStatus, signContractIndividual } from "@/lib/erp-api";
 
 export async function POST(
   request: NextRequest,
@@ -11,8 +11,8 @@ export async function POST(
   }
 
   const body = await request.json().catch(() => ({}));
-  const userAgent = body.user_agent || request.headers.get("user-agent");
-  const clientIp = body.client_ip || request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip");
+  const userAgent = request.headers.get("user-agent") || "Unknown";
+  const clientIp = request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip") || "127.0.0.1";
   const targetEnv =
     body.target_env ||
     request.nextUrl.searchParams.get("env") ||
@@ -20,5 +20,5 @@ export async function POST(
 
   const result = await signContractIndividual(token, body, { userAgent, clientIp }, targetEnv);
 
-  return NextResponse.json(result, { status: result.success ? 200 : 400 });
+  return NextResponse.json(result, { status: getErpHttpStatus(result, result.success ? 200 : 400) });
 }

@@ -63,7 +63,7 @@ export function CertificateDetailModal({
     contract?.pdfSha256 ||
     contract?.pdf_sha256 ||
     completedAuditLog?.metadata?.pdf_sha256 ||
-    '5c1ff87766df800a511d406ca5049557ad3ac8bbbefce94446ec90a12e71bec8';
+    '';
 
   const handleCopySha = () => {
     if (!sha256) return;
@@ -86,11 +86,9 @@ export function CertificateDetailModal({
     contract?.companySignedAt ||
     contract?.company_signed_at ||
     companySignedAuditLog?.created_at ||
-    contract?.company_signature_meta?.signed_at ||
-    contract?.createdAt ||
-    contract?.created_at;
+    contract?.company_signature_meta?.signed_at;
 
-  const companySignedAt = formatViDateTime(companySignedAtRaw) || '20:10:15 10/10/2026';
+  const companySignedAt = formatViDateTime(companySignedAtRaw) || 'Chưa ghi nhận';
 
   // 3. Thời gian Bên B ký
   const customerSignedAtRaw =
@@ -148,7 +146,7 @@ export function CertificateDetailModal({
       : 'Liên kết bảo mật & mã OTP gửi qua Email';
   } else if (channel === 'on_site_mobile') {
     methodText = 'Chữ ký điện tử ký trực tiếp tại hiện trường';
-    channelText = 'Thiết bị di động của kỹ thuật viên Minh Phong';
+    channelText = 'Thiết bị di động của kỹ thuật viên';
   } else {
     methodText = 'Chữ ký điện tử vẽ tay xác thực qua OTP Zalo ZNS / SMS';
     channelText = customerPhone
@@ -156,35 +154,84 @@ export function CertificateDetailModal({
       : 'Liên kết bảo mật & mã OTP gửi qua Zalo / SMS';
   }
 
+  const companyDisplayName =
+    contract?.partyA?.companyName ||
+    contract?.companyName ||
+    contract?.company_name ||
+    companySignedAuditLog?.metadata?.company_name ||
+    'Đơn vị cấp nước';
+
+  const companyTaxCode =
+    contract?.partyA?.taxCode ||
+    contract?.companyTaxCode ||
+    contract?.company_tax_code ||
+    companySignedAuditLog?.metadata?.tax_code ||
+    '—';
+
   const companyCertSerial =
     contract?.companyCertSerial ||
     contract?.company_cert_serial ||
     companySignedAuditLog?.metadata?.cert_serial ||
-    '11a13475fb07';
+    'Chưa ghi nhận';
 
-  // Nội dung Subject X.509 cho Bên A (chuẩn mẫu ảnh 1.4 Mẫu chữ ký số hợp lệ)
-  const partyASubjectText = `Phone = 0359613267
-E = dinhto.nmns@gmail.com
-0.9.2342.19200300.100.1.1 = MST:2301081775
-CN = CONG TY TNHH MTV DAU TU MINH PHONG
-O = CONG TY TNHH MTV DAU TU MINH PHONG
-L = Thi xa Thuan Thanh
-S = Bac Ninh
-C = VN`;
+  const companyCertIssuer =
+    contract?.companyCertIssuer ||
+    contract?.company_cert_issuer ||
+    companySignedAuditLog?.metadata?.cert_issuer ||
+    'Chưa ghi nhận';
+
+  const companyCertSubject =
+    contract?.companyCertSubject ||
+    contract?.company_cert_subject ||
+    companySignedAuditLog?.metadata?.cert_subject ||
+    '';
+
+  const companyCertValidFrom =
+    formatViDateTime(contract?.companyCertValidFrom || contract?.company_cert_valid_from) || '—';
+  const companyCertValidTo =
+    formatViDateTime(contract?.companyCertValidTo || contract?.company_cert_valid_to) || '—';
+
+  const customerTaxCode =
+    contract?.customerCertTaxCode ||
+    contract?.customer_cert_tax_code ||
+    contract?.customer?.taxCode ||
+    'Chưa ghi nhận';
+  const customerCertSerial =
+    contract?.customerCertSerial || contract?.customer_cert_serial || 'Chưa ghi nhận';
+  const customerCertIssuer =
+    contract?.customerCertIssuer || contract?.customer_cert_issuer || 'Chưa ghi nhận';
+  const customerCertValidFrom =
+    formatViDateTime(contract?.customerCertValidFrom || contract?.customer_cert_valid_from) || '—';
+  const customerCertValidTo =
+    formatViDateTime(contract?.customerCertValidTo || contract?.customer_cert_valid_to) || '—';
+  const customerIpAddress =
+    contract?.customerIpAddress || contract?.customer_ip_address || 'Chưa ghi nhận';
+
+  // Nội dung Subject X.509 cho Bên A đọc từ dữ liệu hợp đồng thực tế
+  const partyASubjectText =
+    companyCertSubject ||
+    `0.9.2342.19200300.100.1.1 = MST:${companyTaxCode}
+CN = ${companyDisplayName}
+O = ${companyDisplayName}
+Issuer = ${companyCertIssuer}
+Serial = ${companyCertSerial}`;
 
   // Nội dung Subject X.509 cho Bên B
-  const partyBSubjectText = isB2B
-    ? `0.9.2342.19200300.100.1.1 = MST:${contract?.customerCertTaxCode || contract?.customer_cert_tax_code || '0101243150'}
+  const partyBSubjectText =
+    contract?.customerCertSubject ||
+    contract?.customer_cert_subject ||
+    (isB2B
+      ? `0.9.2342.19200300.100.1.1 = MST:${customerTaxCode}
 CN = ${customerDisplayName}
 O = ${customerDisplayName}
-Issuer = ${contract?.customerCertIssuer || contract?.customer_cert_issuer || 'Tổ chức CA công cộng'}
-Serial = ${contract?.customerCertSerial || contract?.customer_cert_serial || 'N/A'}`
-    : `Phone = ${customerPhone || 'Chưa cung cấp'}
-E = ${customerEmail || 'Chưa cung cấp'}
+Issuer = ${customerCertIssuer}
+Serial = ${customerCertSerial}`
+      : `Phone = ${customerPhone || 'Chưa ghi nhận'}
+E = ${customerEmail || 'Chưa ghi nhận'}
 CN = ${customerDisplayName}
-SignMethod = Chu ky dien tu ve tay xac thuc qua OTP
-IP = ${contract?.customerIpAddress || contract?.customer_ip_address || '127.0.0.1'}
-Status = Da ky xac nhan hop le`;
+SignMethod = ${methodText}
+IP = ${customerIpAddress}
+Status = ${isCustomerSigned ? 'Da ky xac nhan hop le' : 'Cho xac nhan'}`);
 
   const currentSubjectText = selectedParty === 'partyA' ? partyASubjectText : partyBSubjectText;
 
@@ -428,14 +475,15 @@ Status = Da ky xac nhan hop le`;
                         whiteSpace: 'nowrap',
                         maxWidth: '380px',
                       }}
-                      title={sha256}
+                      title={sha256 || 'Chưa ghi nhận'}
                     >
-                      {sha256}
+                      {sha256 || 'Chưa ghi nhận'}
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={handleCopySha}
+                    disabled={!sha256}
                     style={{
                       display: 'inline-flex',
                       alignItems: 'center',
@@ -443,9 +491,9 @@ Status = Da ky xac nhan hop le`;
                       padding: '4px 8px',
                       borderRadius: 6,
                       backgroundColor: '#ffffff',
-                      color: '#334155',
+                      color: sha256 ? '#334155' : '#94a3b8',
                       border: '1px solid #cbd5e1',
-                      cursor: 'pointer',
+                      cursor: sha256 ? 'pointer' : 'not-allowed',
                       fontSize: 10.5,
                       fontWeight: 600,
                       flexShrink: 0,
@@ -500,7 +548,7 @@ Status = Da ky xac nhan hop le`;
                         border: '1px solid #bfdbfe',
                       }}
                     >
-                      Viettel-CA
+                      {companyCertIssuer !== 'Chưa ghi nhận' ? companyCertIssuer : 'USB Token'}
                     </span>
                   </div>
 
@@ -508,18 +556,20 @@ Status = Da ky xac nhan hop le`;
                     <div>
                       <span style={{ color: '#64748b' }}>Đơn vị:</span>{' '}
                       <strong style={{ color: '#0f172a' }}>
-                        {contract?.partyA?.companyName || contract?.company_name || 'Công ty TNHH MTV đầu tư Minh Phong'}
+                        {companyDisplayName}
                       </strong>
                     </div>
                     <div>
                       <span style={{ color: '#64748b' }}>Mã số thuế (OID):</span>{' '}
                       <span style={{ fontFamily: 'monospace', color: '#0f172a', fontWeight: 600 }}>
-                        {contract?.partyA?.taxCode || contract?.company_tax_code || '2301081775'}
+                        {companyTaxCode}
                       </span>
                     </div>
                     <div>
                       <span style={{ color: '#64748b' }}>Hình thức ký:</span>{' '}
-                      <span style={{ color: '#0f172a', fontWeight: 500 }}>Chữ ký số USB Token Viettel-CA</span>
+                      <span style={{ color: '#0f172a', fontWeight: 500 }}>
+                        {companySignedAt !== 'Chưa ghi nhận' ? 'Chữ ký số USB Token' : 'Chưa ký số'}
+                      </span>
                     </div>
                     <div>
                       <span style={{ color: '#64748b' }}>Serial CTS:</span>{' '}
@@ -539,7 +589,7 @@ Status = Da ky xac nhan hop le`;
                     </div>
                     <div>
                       <span style={{ color: '#64748b' }}>Nhà mạng CA:</span>{' '}
-                      <span style={{ color: '#0f172a' }}>Viettel Group (Viettel-CA)</span>
+                      <span style={{ color: '#0f172a' }}>{companyCertIssuer}</span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5, paddingTop: 4, fontSize: 10.5, color: '#0f172a', fontWeight: 600 }}>
                       <Clock size={11} color="#2563eb" />
@@ -618,7 +668,7 @@ Status = Da ky xac nhan hop le`;
                         <div>
                           <span style={{ color: '#64748b' }}>Mã số thuế:</span>{' '}
                           <span style={{ fontFamily: 'monospace', color: '#0f172a', fontWeight: 600 }}>
-                            {contract?.customerCertTaxCode || contract?.customer_cert_tax_code || 'Chưa cung cấp'}
+                            {customerTaxCode}
                           </span>
                         </div>
                         <div>
@@ -634,13 +684,13 @@ Status = Da ky xac nhan hop le`;
                               border: '1px solid #e2e8f0',
                             }}
                           >
-                            {contract?.customerCertSerial || contract?.customer_cert_serial || 'N/A'}
+                            {customerCertSerial}
                           </span>
                         </div>
                         <div>
                           <span style={{ color: '#64748b' }}>Đơn vị cấp CTS:</span>{' '}
                           <span style={{ color: '#0f172a' }}>
-                            {contract?.customerCertIssuer || contract?.customer_cert_issuer || 'Tổ chức CA công cộng'}
+                            {customerCertIssuer}
                           </span>
                         </div>
                       </>
@@ -713,7 +763,7 @@ Status = Da ky xac nhan hop le`;
                     Tải tệp hợp đồng PDF về máy và mở bằng phần mềm <strong>Adobe Acrobat Reader</strong> hoặc <strong>Foxit PDF Reader</strong>.
                   </li>
                   <li>
-                    Nhấp chuột trực tiếp vào <strong>Khung con dấu màu xanh Viettel-CA</strong> trên trang giấy để mở bảng <em>Signature Validation Status</em>.
+                    Nhấp chuột trực tiếp vào <strong>Khung con dấu chữ ký số</strong> trên trang giấy để mở bảng <em>Signature Validation Status</em>.
                   </li>
                   <li>
                     Hoặc bấm vào biểu tượng <strong>Signature Panel (Cây bút / Bảng chữ ký)</strong> ở thanh công cụ bên trái để xem đầy đủ cây chứng chỉ Root CA, dấu thời gian và tính toàn vẹn của Bộ TT&TT.
@@ -743,7 +793,7 @@ Status = Da ky xac nhan hop le`;
                       boxShadow: selectedParty === 'partyA' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
                     }}
                   >
-                    Bên A: Cty Minh Phong (Viettel-CA)
+                    Bên A: {companyDisplayName}
                   </button>
                   <button
                     type="button"
@@ -854,22 +904,28 @@ Status = Da ky xac nhan hop le`;
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '4px 8px', color: '#475569' }}>Issuer</td>
                           <td style={{ padding: '4px 8px', color: '#0f172a' }}>
-                            {selectedParty === 'partyA' ? 'VIETTEL-CA, TAP DOAN CONG NGHIEP - VIEN THONG...' : (contract?.customerCertIssuer || 'Tổ chức CA / Cổng ký xác thực Minh Phong')}
+                            {selectedParty === 'partyA' ? companyCertIssuer : customerCertIssuer}
                           </td>
                         </tr>
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '4px 8px', color: '#475569' }}>Valid from</td>
-                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>Tuesday, October 13, 2026</td>
+                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>
+                            {selectedParty === 'partyA' ? companyCertValidFrom : customerCertValidFrom}
+                          </td>
                         </tr>
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
                           <td style={{ padding: '4px 8px', color: '#475569' }}>Valid to</td>
-                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>Monday, October 13, 2031</td>
+                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>
+                            {selectedParty === 'partyA' ? companyCertValidTo : customerCertValidTo}
+                          </td>
                         </tr>
                         {/* Hàng Subject được highlight giống như khi click vào trong Adobe */}
                         <tr style={{ backgroundColor: '#0284c7', color: '#ffffff' }}>
                           <td style={{ padding: '4px 8px', fontWeight: 600 }}>Subject</td>
                           <td style={{ padding: '4px 8px', fontFamily: 'monospace', fontSize: 10 }}>
-                            {selectedParty === 'partyA' ? 'MST:2301081775  CONG TY TNHH MTV DAU TU MINH PHONG' : customerDisplayName}
+                            {selectedParty === 'partyA'
+                              ? (companyTaxCode !== '—' ? `MST:${companyTaxCode}  ${companyDisplayName}` : companyDisplayName)
+                              : customerDisplayName}
                           </td>
                         </tr>
                         <tr style={{ borderBottom: '1px solid #f1f5f9' }}>
@@ -878,7 +934,7 @@ Status = Da ky xac nhan hop le`;
                         </tr>
                         <tr>
                           <td style={{ padding: '4px 8px', color: '#475569' }}>Thumbprint algorithm</td>
-                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>sha1</td>
+                          <td style={{ padding: '4px 8px', color: '#0f172a' }}>sha256</td>
                         </tr>
                       </tbody>
                     </table>
@@ -961,7 +1017,7 @@ Status = Da ky xac nhan hop le`;
                     <strong style={{ color: '#0f172a' }}>CN & O:</strong> Tên đầy đủ của chủ thể và cơ quan / tổ chức pháp nhân.
                   </div>
                   <div>
-                    <strong style={{ color: '#0f172a' }}>L & S:</strong> Địa giới hành chính Thị xã Thuận Thành, Tỉnh Bắc Ninh.
+                    <strong style={{ color: '#0f172a' }}>L & S:</strong> Địa giới hành chính (Quận / Huyện, Tỉnh / Thành phố) trên chứng thư.
                   </div>
                   <div>
                     <strong style={{ color: '#0f172a' }}>C:</strong> Mã quốc gia Việt Nam (VN).

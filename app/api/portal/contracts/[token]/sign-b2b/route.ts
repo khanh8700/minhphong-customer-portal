@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { signContractBusiness } from "@/lib/erp-api";
+import { getErpHttpStatus, signContractBusiness } from "@/lib/erp-api";
 
 export async function POST(
   request: NextRequest,
@@ -7,18 +7,44 @@ export async function POST(
 ) {
   const { token } = await params;
   if (!token) {
-    return NextResponse.json({ success: false, error: "Mã token không hợp lệ" }, { status: 400 });
+    return NextResponse.json(
+      { success: false, error: "Mã token không hợp lệ" },
+      { status: 400 }
+    );
   }
 
   const body = await request.json().catch(() => ({}));
-  const userAgent = body.user_agent || request.headers.get("user-agent");
-  const clientIp = body.client_ip || request.headers.get("x-forwarded-for")?.split(",")[0].trim() || request.headers.get("x-real-ip");
+  const userAgent = request.headers.get("user-agent") || "Unknown";
+  const clientIp =
+    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
+    request.headers.get("x-real-ip") ||
+    "127.0.0.1";
   const targetEnv =
     body.target_env ||
     request.nextUrl.searchParams.get("env") ||
     request.cookies.get("erp_target_env")?.value;
 
-  const result = await signContractBusiness(token, body, { userAgent, clientIp }, targetEnv);
+  const result = await signContractBusiness(
+    token,
+    {
+      session_id: body.session_id || "",
+      signature_base64: body.signature_base64 || "",
+      cert_base64: body.cert_base64 || "",
+      tax_code: body.tax_code || "",
+      company_name: body.company_name,
+      cert_serial: body.cert_serial,
+      valid_to: body.valid_to,
+      issuer: body.issuer,
+      representative: body.representative,
+      representative_position: body.representative_position,
+      terms_agreed: body.terms_agreed,
+      user_agent: body.user_agent,
+      client_ip: body.client_ip,
+    },
+    { userAgent, clientIp },
+    targetEnv
+  );
 
-  return NextResponse.json(result, { status: result.success ? 200 : 400 });
+  const status = getErpHttpStatus(result, result.success ? 200 : 400);
+  return NextResponse.json(result, { status });
 }

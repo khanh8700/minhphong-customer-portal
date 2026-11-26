@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getErpBaseUrl } from "@/lib/erp-api";
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ token: string }> }
 ) {
   const { token } = await params;
@@ -10,7 +10,13 @@ export async function POST(
     return NextResponse.json({ success: false, error: "Mã token không hợp lệ" }, { status: 400 });
   }
 
-  const erpBaseUrl = getErpBaseUrl();
+  const body = await request.json().catch(() => ({}));
+  const targetEnv =
+    (typeof body?.target_env === "string" ? body.target_env : undefined) ||
+    request.nextUrl.searchParams.get("env") ||
+    request.cookies.get("erp_target_env")?.value;
+
+  const erpBaseUrl = getErpBaseUrl(targetEnv);
   try {
     const res = await fetch(`${erpBaseUrl}/api/portal/contracts/${token}/reset-dev`, {
       method: "POST",
