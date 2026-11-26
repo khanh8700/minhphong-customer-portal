@@ -12,7 +12,6 @@ export type AdminSession = { email: string; role: AdminRole };
 
 function parseAdminSession(value: string | undefined): AdminSession | null {
   if (!value) return null;
-  if (value === "true") return { email: "legacy-admin", role: "system_admin" };
   const [payload, signature] = value.split(".");
   if (!payload || !signature || !verifySignature(payload, signature)) return null;
   try {

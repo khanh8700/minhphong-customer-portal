@@ -5,6 +5,18 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
+  // Chặn hoàn toàn trên môi trường Production để ngăn ngừa rò rỉ hạ tầng
+  if (process.env.NODE_ENV === "production") {
+    return NextResponse.json({ error: "Endpoint not found" }, { status: 404 });
+  }
+
+  // Trên môi trường dev/staging: yêu cầu token bảo mật nội bộ
+  const debugKey = request.headers.get("x-debug-key") || request.nextUrl.searchParams.get("key");
+  const expectedKey = process.env.DEBUG_ERP_KEY;
+  if (!expectedKey || debugKey !== expectedKey) {
+    return NextResponse.json({ error: "Unauthorized debug access" }, { status: 401 });
+  }
+
   const token = request.nextUrl.searchParams.get("token") || "c80db5a0-a677-4988-916d-4f8f4d5e74c5";
   const envParam = request.nextUrl.searchParams.get("env") || "staging";
   const resolved = resolveErpEnvironment(envParam);
@@ -50,21 +62,22 @@ export async function GET(request: NextRequest) {
       }
 
       results[url] = {
-        ok: res.ok,
         status: res.status,
         statusText: res.statusText,
-        contentType,
         durationMs,
-        responseHeaders: Object.fromEntries(res.headers.entries()),
-        bodySnippet: text.slice(0, 500),
-        isJson: !!parsed,
+        contentType,
+        headers: {
+          server: res.headers.get("server"),
+          date: res.headers.get("date"),
+          contentLength: res.headers.get("content-length"),
+        },
+        bodyPreview: parsed || (text.length > 500 ? `${text.slice(0, 500)}...` : text),
       };
-    } catch (err) {
+    } catch (err: unknown) {
       results[url] = {
-        ok: false,
-        durationMs: Date.now() - startTime,
         error: err instanceof Error ? err.message : String(err),
-        stack: err instanceof Error ? err.stack : undefined,
+        stack: err instanceof Error ? err.stack : null,
+        durationMs: Date.now() - startTime,
       };
     }
   }
@@ -72,6 +85,6 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     timestamp: new Date().toISOString(),
     envVars,
-    results,
+    tests: results,
   });
 }
